@@ -20,6 +20,7 @@ from vllm.model_executor.model_loader import (
 from vllm.transformers_utils.config import get_config_parser, register_config_parser
 
 from .config_parser import GGUFConfigParser
+from .gemma4 import register_gemma4_gguf_support
 from .gguf_utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
 from .loader import GGUFModelLoader
 from .quantization import GGUFConfig
@@ -121,3 +122,4 @@ def register() -> None:
         register_config_parser("gguf")(GGUFConfigParser)
     _patch_engine_args()
     _patch_speculator_probe()
+    register_gemma4_gguf_support()

@@ -21,9 +21,16 @@ from vllm.transformers_utils.config import get_config_parser, register_config_pa
 
 from .config_parser import GGUFConfigParser
 from .gemma4 import register_gemma4_gguf_support
-from .gguf_utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
+from .gguf_utils import (
+    check_gguf_file,
+    is_gguf,
+    is_local_gguf_quant,
+    is_remote_gguf,
+    split_remote_gguf,
+)
 from .loader import GGUFModelLoader
 from .quantization import GGUFConfig
+from .weight_utils import download_gguf, resolve_local_gguf
 
 OOTGGUFConfig = GGUFConfig
 OOTGGUFModelLoader = GGUFModelLoader
@@ -35,6 +42,28 @@ def _is_gguf_reference(model: str | None) -> bool:
     return model.endswith(".gguf") or is_remote_gguf(model) or is_gguf(model)
 
 
+def _resolve_local_gguf_path(model: str) -> str:
+    """Resolve a GGUF reference to a concrete local ``.gguf`` file path.
+
+    Pure-GGUF repos ship no ``config.json``, so pointing the config/tokenizer
+    loaders at the repo id or parent dir alone fails. Resolving to the actual
+    file lets transformers read config (and tokenizer) straight from the GGUF
+    metadata via its ``gguf_file`` support. Remote references are downloaded
+    here (``snapshot_download`` is cached, so the loader's later fetch is a
+    no-op).
+    """
+    model_str = str(model)
+    if check_gguf_file(model_str):
+        return model_str
+    if is_remote_gguf(model_str):
+        repo_id, quant = split_remote_gguf(model_str)
+        return download_gguf(repo_id, quant)
+    if is_local_gguf_quant(model_str):
+        local_dir, quant = model_str.rsplit(":", 1)
+        return resolve_local_gguf(local_dir, quant)
+    return model_str
+
+
 def _get_gguf_config_source(
     model: str,
     tokenizer: str | None,
@@ -44,12 +73,7 @@ def _get_gguf_config_source(
         return hf_config_path
     if tokenizer is not None and not _is_gguf_reference(tokenizer):
         return tokenizer
-    if is_remote_gguf(model):
-        repo_id, _ = split_remote_gguf(model)
-        return repo_id
-    if check_gguf_file(model):
-        return str(Path(model).parent)
-    return model
+    return _resolve_local_gguf_path(model)
 
 
 def _patch_engine_args() -> None:

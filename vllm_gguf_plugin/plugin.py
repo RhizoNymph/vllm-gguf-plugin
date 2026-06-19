@@ -42,25 +42,26 @@ def _is_gguf_reference(model: str | None) -> bool:
     return model.endswith(".gguf") or is_remote_gguf(model) or is_gguf(model)
 
 
-def _resolve_local_gguf_path(model: str) -> str:
-    """Resolve a GGUF reference to a concrete local ``.gguf`` file path.
+def _resolve_local_gguf_dir(model: str) -> str:
+    """Resolve a GGUF reference to the local directory containing the ``.gguf``.
 
-    Pure-GGUF repos ship no ``config.json``, so pointing the config/tokenizer
-    loaders at the repo id or parent dir alone fails. Resolving to the actual
-    file lets transformers read config (and tokenizer) straight from the GGUF
-    metadata via its ``gguf_file`` support. Remote references are downloaded
-    here (``snapshot_download`` is cached, so the loader's later fetch is a
-    no-op).
+    Pure-GGUF repos ship no ``config.json``, so pointing the loaders at the
+    repo id alone fails. We resolve to the directory holding the actual file
+    (downloading remote references here; ``snapshot_download`` is cached, so
+    the loader's later fetch is a no-op) — a directory, not the file itself,
+    because transformers' auxiliary loaders (image processor, etc.) treat
+    ``model`` as a repo id / dir and reject a bare file path. The config
+    parser then reads config from the ``.gguf`` in that dir via ``gguf_file``.
     """
     model_str = str(model)
     if check_gguf_file(model_str):
-        return model_str
+        return str(Path(model_str).parent)
     if is_remote_gguf(model_str):
         repo_id, quant = split_remote_gguf(model_str)
-        return download_gguf(repo_id, quant)
+        return str(Path(download_gguf(repo_id, quant)).parent)
     if is_local_gguf_quant(model_str):
         local_dir, quant = model_str.rsplit(":", 1)
-        return resolve_local_gguf(local_dir, quant)
+        return str(Path(resolve_local_gguf(local_dir, quant)).parent)
     return model_str
 
 
@@ -73,7 +74,7 @@ def _get_gguf_config_source(
         return hf_config_path
     if tokenizer is not None and not _is_gguf_reference(tokenizer):
         return tokenizer
-    return _resolve_local_gguf_path(model)
+    return _resolve_local_gguf_dir(model)
 
 
 def _patch_engine_args() -> None:

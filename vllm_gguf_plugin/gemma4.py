@@ -212,6 +212,7 @@ def _patch_gemma4_tokenizer() -> None:
                 kwargs["gguf_file"] = gguf_path.name
 
         gguf_bos: int | None = None
+        gguf_eos: int | None = None
         is_gemma4 = False
         if gguf_path is not None:
             try:
@@ -226,8 +227,13 @@ def _patch_gemma4_tokenizer() -> None:
                         gguf_bos = int(
                             bos_field.parts[bos_field.data[0]].tolist()[0]
                         )
+                    eos_field = reader.fields.get("tokenizer.ggml.eos_token_id")
+                    if eos_field is not None:
+                        gguf_eos = int(
+                            eos_field.parts[eos_field.data[0]].tolist()[0]
+                        )
             except Exception as exc:
-                logger.debug("gguf BOS probe failed for %s: %s", gguf_path, exc)
+                logger.debug("gguf BOS/EOS probe failed for %s: %s", gguf_path, exc)
 
         if is_gemma4 and "add_bos_token" not in kwargs:
             kwargs["add_bos_token"] = True
@@ -264,6 +270,19 @@ def _patch_gemma4_tokenizer() -> None:
                 logger.debug(
                     "failed to override post_processor for BOS: %s", exc
                 )
+
+        if is_gemma4 and gguf_eos is not None:
+            # The GGUF tokenizer converter defaults eos to a generic token
+            # (e.g. </s>, id 212) instead of Gemma4's turn terminator
+            # ``<turn|>`` (the GGUF-declared eos_token_id). Without this,
+            # generation never stops on turn end and the model rambles.
+            try:
+                eos_str = tokenizer.convert_ids_to_tokens(gguf_eos)
+                if eos_str:
+                    tokenizer.eos_token = eos_str
+                tokenizer.eos_token_id = gguf_eos
+            except Exception as exc:
+                logger.debug("failed to set EOS attrs on tokenizer: %s", exc)
         return tokenizer
 
     AutoTokenizer.from_pretrained = _patched_tokenizer_from_pretrained

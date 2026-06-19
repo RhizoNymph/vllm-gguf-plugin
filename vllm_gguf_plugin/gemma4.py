@@ -179,9 +179,9 @@ def _patch_gemma4_tokenizer() -> None:
     def _patched_tokenizer_from_pretrained(
         pretrained_model_name_or_path, *args, **kwargs
     ):
-        # vLLM passes the gguf basename as ``gguf_file`` alongside the
-        # model path (which may be either the .gguf file itself or its
-        # parent directory). Locate the actual file from that pair.
+        # Locate the backing .gguf file. The model path may be the .gguf
+        # itself, a dir containing it, or a path paired with a ``gguf_file``
+        # kwarg.
         gguf_path: Path | None = None
         base = Path(pretrained_model_name_or_path)
         gguf_file = kwargs.get("gguf_file")
@@ -192,6 +192,24 @@ def _patch_gemma4_tokenizer() -> None:
                 gguf_path = candidate
         elif base.suffix == ".gguf" and base.is_file():
             gguf_path = base
+        elif base.is_dir() and not (
+            (base / "tokenizer.json").is_file()
+            or (base / "tokenizer_config.json").is_file()
+        ):
+            # GGUF-only directory (no HF tokenizer files): build the tokenizer
+            # from the GGUF's embedded tokenizer. transformers needs to be
+            # told which file via ``gguf_file``; without this it can't
+            # instantiate any backend tokenizer. Applies to all GGUF archs,
+            # not just gemma4.
+            ggufs = sorted(
+                g
+                for g in base.glob("*.gguf")
+                if not g.name.lower().startswith("mmproj")
+                and "mtp" not in g.name.lower()
+            )
+            if ggufs:
+                gguf_path = ggufs[0]
+                kwargs["gguf_file"] = gguf_path.name
 
         gguf_bos: int | None = None
         is_gemma4 = False

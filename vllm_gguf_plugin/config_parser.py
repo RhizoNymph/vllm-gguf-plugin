@@ -16,6 +16,28 @@ from .gguf_utils import (
 )
 
 
+def _find_local_gguf_file(model: str | Path) -> str | None:
+    """Return a concrete local ``.gguf`` file for *model* (a file or dir).
+
+    Pure-GGUF sources ship no ``config.json``; locating the actual file lets
+    us hand transformers ``gguf_file`` so it reads the config from the GGUF
+    metadata. Auxiliary files (mmproj projector, MTP) are skipped.
+    """
+    model_str = str(model)
+    if check_gguf_file(model_str):
+        return model_str
+    path = Path(model_str)
+    if path.is_dir():
+        candidates = sorted(
+            g
+            for g in path.glob("*.gguf")
+            if not g.name.lower().startswith("mmproj") and "mtp" not in g.name.lower()
+        )
+        if candidates:
+            return str(candidates[0])
+    return None
+
+
 class GGUFConfigParser(ConfigParserBase):
     def parse(
         self,
@@ -26,7 +48,14 @@ class GGUFConfigParser(ConfigParserBase):
         **kwargs,
     ) -> tuple[dict, PretrainedConfig]:
         original_model = model
-        resolved_model = self._resolve_config_source(model)
+        gguf_file_path = _find_local_gguf_file(model)
+        if gguf_file_path is not None:
+            # Pure-GGUF source (no config.json): have transformers read the
+            # config straight from the GGUF metadata via ``gguf_file``.
+            resolved_model = str(Path(gguf_file_path).parent)
+            kwargs = {**kwargs, "gguf_file": Path(gguf_file_path).name}
+        else:
+            resolved_model = self._resolve_config_source(model)
         config_dict, config = HFConfigParser().parse(
             resolved_model,
             trust_remote_code=trust_remote_code,
@@ -46,8 +75,9 @@ class GGUFConfigParser(ConfigParserBase):
         config_dict["architectures"] = [model_type]
         config.update({"architectures": [model_type]})
 
-        if is_gguf(original_model):
-            config = maybe_patch_hf_config_from_gguf(str(original_model), config)
+        patch_source = gguf_file_path if gguf_file_path is not None else original_model
+        if is_gguf(patch_source):
+            config = maybe_patch_hf_config_from_gguf(str(patch_source), config)
 
         return config_dict, config
 

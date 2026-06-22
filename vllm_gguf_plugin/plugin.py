@@ -20,9 +20,17 @@ from vllm.model_executor.model_loader import (
 from vllm.transformers_utils.config import get_config_parser, register_config_parser
 
 from .config_parser import GGUFConfigParser
-from .gguf_utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
+from .gemma4 import register_gemma4_gguf_support
+from .gguf_utils import (
+    check_gguf_file,
+    is_gguf,
+    is_local_gguf_quant,
+    is_remote_gguf,
+    split_remote_gguf,
+)
 from .loader import GGUFModelLoader
 from .quantization import GGUFConfig
+from .weight_utils import download_gguf, resolve_local_gguf
 
 OOTGGUFConfig = GGUFConfig
 OOTGGUFModelLoader = GGUFModelLoader
@@ -34,6 +42,29 @@ def _is_gguf_reference(model: str | None) -> bool:
     return model.endswith(".gguf") or is_remote_gguf(model) or is_gguf(model)
 
 
+def _resolve_local_gguf_dir(model: str) -> str:
+    """Resolve a GGUF reference to the local directory containing the ``.gguf``.
+
+    Pure-GGUF repos ship no ``config.json``, so pointing the loaders at the
+    repo id alone fails. We resolve to the directory holding the actual file
+    (downloading remote references here; ``snapshot_download`` is cached, so
+    the loader's later fetch is a no-op) — a directory, not the file itself,
+    because transformers' auxiliary loaders (image processor, etc.) treat
+    ``model`` as a repo id / dir and reject a bare file path. The config
+    parser then reads config from the ``.gguf`` in that dir via ``gguf_file``.
+    """
+    model_str = str(model)
+    if check_gguf_file(model_str):
+        return str(Path(model_str).parent)
+    if is_remote_gguf(model_str):
+        repo_id, quant = split_remote_gguf(model_str)
+        return str(Path(download_gguf(repo_id, quant)).parent)
+    if is_local_gguf_quant(model_str):
+        local_dir, quant = model_str.rsplit(":", 1)
+        return str(Path(resolve_local_gguf(local_dir, quant)).parent)
+    return model_str
+
+
 def _get_gguf_config_source(
     model: str,
     tokenizer: str | None,
@@ -43,12 +74,7 @@ def _get_gguf_config_source(
         return hf_config_path
     if tokenizer is not None and not _is_gguf_reference(tokenizer):
         return tokenizer
-    if is_remote_gguf(model):
-        repo_id, _ = split_remote_gguf(model)
-        return repo_id
-    if check_gguf_file(model):
-        return str(Path(model).parent)
-    return model
+    return _resolve_local_gguf_dir(model)
 
 
 def _patch_engine_args() -> None:
@@ -121,3 +147,4 @@ def register() -> None:
         register_config_parser("gguf")(GGUFConfigParser)
     _patch_engine_args()
     _patch_speculator_probe()
+    register_gemma4_gguf_support()

@@ -57,6 +57,8 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             model_type = "command-r"
         if model_type == "gemma3_text":
             model_type = "gemma3"
+        if model_type == "gemma4_text":
+            model_type = "gemma4"
         if model_type in ("deepseek_v3", "deepseek_v2"):
             model_type = "deepseek2"
             for idx in range(config.num_hidden_layers):
@@ -195,7 +197,14 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             if hf_name.endswith((".weight", ".bias")):
                 base_name, suffix = hf_name.rsplit(".", 1)
             else:
-                base_name, suffix = hf_name, ""
+                # HF tensors whose name doesn't end in ".weight"/".bias"
+                # (e.g. Gemma4's registered ``layer_scalar`` buffer) are still
+                # stored in GGUF with a ".weight" suffix appended. For gemma4
+                # default to "weight" — otherwise the lookup produces a
+                # trailing-dot key (``...layer_output_scale.``) that silently
+                # never matches the actual GGUF tensor.
+                base_name = hf_name
+                suffix = "weight" if model_type == "gemma4" else ""
                 if base_name.endswith("_weight"):
                     base_name = base_name[:-7]
                     suffix = "weight"

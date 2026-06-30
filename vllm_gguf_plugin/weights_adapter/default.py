@@ -233,6 +233,32 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 if not any(regex.fullmatch(p, x) for p in sideload_params)
             ]
         if unmapped_params:
+            # Multimodal checkpoints (e.g. gemma-4) carry vision-tower / vision
+            # tensors that the text-only vLLM model never loads; skip them
+            # instead of failing the whole load (restores the pre-plugin
+            # lenient behavior).
+            _mm = [
+                x
+                for x in unmapped_params
+                if any(
+                    s in x
+                    for s in (
+                        "vision_tower",
+                        "embed_vision",
+                        "vision_model",
+                        "multi_modal_projector",
+                    )
+                )
+            ]
+            if _mm:
+                logger.warning(
+                    "Skipping %d unmapped multimodal GGUF params for text-only "
+                    "load (e.g. %s)",
+                    len(_mm),
+                    _mm[:3],
+                )
+                unmapped_params = [x for x in unmapped_params if x not in _mm]
+        if unmapped_params:
             raise RuntimeError(
                 f"Failed to map GGUF parameters "
                 f"({len(unmapped_params)}): {unmapped_params}"

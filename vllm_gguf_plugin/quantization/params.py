@@ -343,6 +343,14 @@ def _materialize_gguf_weight_parameter(
     qweight.shard_id_map = dict(raw_param.shard_id_map)
     if hasattr(raw_param, "ignore_warning"):
         qweight.ignore_warning = raw_param.ignore_warning
+    # Drop the source's references to the per-shard tensors. Without this the
+    # raw (pre-materialization) parameter keeps the individual shards alive
+    # even after ``_create_padded_weight_param`` merges + clears the new
+    # parameter's copy, doubling merged-layer weight memory (e.g. gemma4
+    # gate_up/qkv → ~2x model footprint, OOMs single-GPU load).
+    raw_param.data_container.clear()
+    raw_param.shard_id.clear()
+    raw_param.shard_id_map.clear()
     layer.register_parameter(param_name, qweight)
 
 

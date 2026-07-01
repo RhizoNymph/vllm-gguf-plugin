@@ -68,9 +68,43 @@ class GGUFConfigParser(ConfigParserBase):
             config_dict["norm_topk_prob"] = True
             config.update({"norm_topk_prob": True})
 
+        text_config = getattr(config, "text_config", None)
+        if (
+            text_config is not None
+            and getattr(text_config, "model_type", None)
+            in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+        ):
+            config = text_config
+            config_dict = config.to_dict()
+
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
 
+        # gemma4 'laptop variant' GGUFs share K/V on full-attention layers
+        # (no attn_v tensor); signal the model via attention_k_eq_v so it
+        # reuses K as V instead of building an empty V proj (garbage out).
+        if (
+            config.model_type in ("gemma4", "gemma4_text")
+            and gguf_file_path is not None
+        ):
+            import gguf as _gguf
+            _n = {t.name for t in _gguf.GGUFReader(gguf_file_path).tensors}
+            _nl = getattr(config, "num_hidden_layers", 0)
+            if any(
+                f"blk.{i}.attn_q.weight" in _n
+                and f"blk.{i}.attn_v.weight" not in _n
+                for i in range(_nl)
+            ):
+                config.attention_k_eq_v = True
+                config_dict["attention_k_eq_v"] = True
+        # llama.cpp gemma4 GGUFs carry *_logit_softcapping (inherited from
+        # gemma2/3); HF Gemma4 defaults to None and applying them saturates
+        # logits -> garbage. Native transformers maps them from GGUF, so
+        # unset (mirrors the plugin's in-tree gemma4 GGUF patch).
+        for _scf in ("final_logit_softcapping", "attn_logit_softcapping"):
+            if getattr(config, _scf, None) is not None:
+                setattr(config, _scf, None)
+                config_dict[_scf] = None
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config_dict["architectures"] = [model_type]
         config.update({"architectures": [model_type]})

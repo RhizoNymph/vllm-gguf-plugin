@@ -59,6 +59,20 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             model_type = "gemma3"
         if model_type == "gemma4_text":
             model_type = "gemma4"
+        if model_type == "qwen3_5_text":
+            model_type = "qwen35"
+            for idx, layer_type in enumerate(config.layer_types):
+                if layer_type == "linear_attention":
+                    gguf_to_hf_name_map[f"blk.{idx}.ssm_dt.bias"] = (
+                        f"model.layers.{idx}.linear_attn.dt_bias"
+                    )
+        if model_type == "qwen3_5_moe_text":
+            model_type = "qwen35moe"
+            for idx, layer_type in enumerate(config.layer_types):
+                if layer_type == "linear_attention":
+                    gguf_to_hf_name_map[f"blk.{idx}.ssm_dt.bias"] = (
+                        f"model.layers.{idx}.linear_attn.dt_bias"
+                    )
         if model_type in ("deepseek_v3", "deepseek_v2"):
             model_type = "deepseek2"
             for idx in range(config.num_hidden_layers):

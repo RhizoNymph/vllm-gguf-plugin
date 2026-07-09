@@ -120,6 +120,7 @@ class TestIsLocalGGUFQuant:
         mock_path_inst.is_dir.return_value = True
         assert is_local_gguf_quant("/some/dir:Q8_0")
         assert is_local_gguf_quant("/mnt/data/model-gguf:Q4_K_M")
+        assert is_local_gguf_quant("/mnt/data/model-gguf:UD-Q4_K_XL")
 
     def test_is_local_gguf_quant_no_colon(self):
         """Test without colon."""

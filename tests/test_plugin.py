@@ -227,6 +227,78 @@ def test_register_sets_engine_args_for_gguf_model(monkeypatch):
     assert engine_args.load_format == "gguf"
 
 
+def test_register_sets_engine_args_for_gguf_dir(tmp_path, monkeypatch):
+    register()
+    captured = {}
+    qwen_path = tmp_path / "Qwen3.6-27B-UD-Q4_K_XL.gguf"
+    qwen_path.write_bytes(b"GGUF")
+    gemma_path = tmp_path / "gemma-4-31B-it-Q4_K_S.gguf"
+    gemma_path.write_bytes(b"GGUF")
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    engine_args = EngineArgs(model=str(tmp_path))
+
+    engine_args.create_model_config()
+
+    assert captured["config_format"] == "gguf"
+    assert captured["model"] == str(tmp_path)
+    assert captured["model_weights"] == str(qwen_path)
+    assert captured["hf_config_path"] == str(qwen_path)
+    assert captured["quantization"] == "gguf"
+    assert engine_args.load_format == "gguf"
+
+
+def test_register_sets_engine_args_for_local_gguf_quant(tmp_path, monkeypatch):
+    register()
+    captured = {}
+    qwen_path = tmp_path / "Qwen3.6-27B-UD-Q4_K_XL.gguf"
+    qwen_path.write_bytes(b"GGUF")
+    gemma_path = tmp_path / "gemma-4-31B-it-Q4_K_S.gguf"
+    gemma_path.write_bytes(b"GGUF")
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    engine_args = EngineArgs(model=f"{tmp_path}:Q4_K_S")
+
+    engine_args.create_model_config()
+
+    assert captured["config_format"] == "gguf"
+    assert captured["model"] == str(tmp_path)
+    assert captured["model_weights"] == str(gemma_path)
+    assert captured["hf_config_path"] == str(gemma_path)
+    assert captured["quantization"] == "gguf"
+    assert engine_args.load_format == "gguf"
+
+
+def test_register_sets_engine_args_for_nonstandard_local_gguf_quant(
+    tmp_path, monkeypatch
+):
+    register()
+    captured = {}
+    qwen_path = tmp_path / "Qwen3.6-27B-UD-Q4_K_XL.gguf"
+    qwen_path.write_bytes(b"GGUF")
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    engine_args = EngineArgs(model=f"{tmp_path}:UD-Q4_K_XL")
+
+    engine_args.create_model_config()
+
+    assert captured["model"] == str(tmp_path)
+    assert captured["model_weights"] == str(qwen_path)
+    assert captured["hf_config_path"] == str(qwen_path)
+
+
 def test_register_skips_speculator_probe_for_gguf():
     register()
 

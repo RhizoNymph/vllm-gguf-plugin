@@ -40,7 +40,44 @@ OOTGGUFModelLoader = GGUFModelLoader
 def _is_gguf_reference(model: str | None) -> bool:
     if not model:
         return False
-    return model.endswith(".gguf") or is_remote_gguf(model) or is_gguf(model)
+    model_path = Path(model)
+    return (
+        model.endswith(".gguf")
+        or is_remote_gguf(model)
+        or is_gguf(model)
+        or _find_local_gguf_file(model_path) is not None
+    )
+
+
+def _find_local_gguf_file(model: str | Path) -> str | None:
+    model_path = Path(model)
+    if check_gguf_file(str(model_path)):
+        return str(model_path)
+    if not model_path.is_dir():
+        return None
+    candidates = sorted(
+        gguf_file
+        for gguf_file in model_path.glob("*.gguf")
+        if not gguf_file.name.lower().startswith("mmproj")
+        and "mtp" not in gguf_file.name.lower()
+    )
+    if candidates:
+        return str(candidates[0])
+    return None
+
+
+def _resolve_gguf_weights(model: str) -> str:
+    model_str = str(model)
+    local_file = _find_local_gguf_file(model_str)
+    if local_file is not None:
+        return local_file
+    if is_remote_gguf(model_str):
+        repo_id, quant = split_remote_gguf(model_str)
+        return download_gguf(repo_id, quant)
+    if is_local_gguf_quant(model_str):
+        local_dir, quant = model_str.rsplit(":", 1)
+        return resolve_local_gguf(local_dir, quant)
+    return model_str
 
 
 def _resolve_local_gguf_dir(model: str) -> str:
@@ -54,16 +91,7 @@ def _resolve_local_gguf_dir(model: str) -> str:
     ``model`` as a repo id / dir and reject a bare file path. The config
     parser then reads config from the ``.gguf`` in that dir via ``gguf_file``.
     """
-    model_str = str(model)
-    if check_gguf_file(model_str):
-        return str(Path(model_str).parent)
-    if is_remote_gguf(model_str):
-        repo_id, quant = split_remote_gguf(model_str)
-        return str(Path(download_gguf(repo_id, quant)).parent)
-    if is_local_gguf_quant(model_str):
-        local_dir, quant = model_str.rsplit(":", 1)
-        return str(Path(resolve_local_gguf(local_dir, quant)).parent)
-    return model_str
+    return str(Path(_resolve_gguf_weights(model)).parent)
 
 
 def _get_gguf_config_source(
@@ -88,6 +116,7 @@ def _patch_engine_args() -> None:
     def create_model_config(self, *args, **kwargs):
         if _is_gguf_reference(self.model):
             gguf_model = self.model
+            gguf_weights = _resolve_gguf_weights(str(gguf_model))
             if self.quantization is None:
                 self.quantization = "gguf"
             if self.load_format == "auto":
@@ -95,13 +124,16 @@ def _patch_engine_args() -> None:
             if self.config_format == "auto":
                 self.config_format = "gguf"
             if not self.model_weights:
-                self.model_weights = gguf_model
+                self.model_weights = gguf_weights
             if self.served_model_name is None:
                 self.served_model_name = [gguf_model]
+            hf_config_path = self.hf_config_path
+            if hf_config_path is None and check_gguf_file(str(gguf_weights)):
+                self.hf_config_path = gguf_weights
             self.model = _get_gguf_config_source(
-                gguf_model,
+                gguf_weights,
                 self.tokenizer if isinstance(self.tokenizer, str) else None,
-                self.hf_config_path,
+                hf_config_path,
             )
         return original_create_model_config(self, *args, **kwargs)
 

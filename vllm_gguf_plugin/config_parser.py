@@ -52,7 +52,7 @@ class GGUFConfigParser(ConfigParserBase):
         if gguf_file_path is not None:
             # Pure-GGUF source (no config.json): have transformers read the
             # config straight from the GGUF metadata via ``gguf_file``.
-            resolved_model = str(Path(gguf_file_path).parent)
+            resolved_model = Path(gguf_file_path).parent
             kwargs = {**kwargs, "gguf_file": Path(gguf_file_path).name}
         else:
             resolved_model = self._resolve_config_source(model)

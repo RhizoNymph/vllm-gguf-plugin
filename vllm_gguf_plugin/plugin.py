@@ -29,6 +29,7 @@ from .gguf_utils import (
     split_remote_gguf,
 )
 from .loader import GGUFModelLoader
+from .qwen35 import register_qwen35_gguf_support
 from .quantization import GGUFConfig
 from .weight_utils import download_gguf, resolve_local_gguf
 
@@ -148,3 +149,4 @@ def register() -> None:
     _patch_engine_args()
     _patch_speculator_probe()
     register_gemma4_gguf_support()
+    register_qwen35_gguf_support()

@@ -59,6 +59,20 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             model_type = "gemma3"
         if model_type == "gemma4_text":
             model_type = "gemma4"
+        if model_type == "qwen3_5_text":
+            model_type = "qwen35"
+            for idx, layer_type in enumerate(config.layer_types):
+                if layer_type == "linear_attention":
+                    gguf_to_hf_name_map[f"blk.{idx}.ssm_dt.bias"] = (
+                        f"model.layers.{idx}.linear_attn.dt_bias"
+                    )
+        if model_type == "qwen3_5_moe_text":
+            model_type = "qwen35moe"
+            for idx, layer_type in enumerate(config.layer_types):
+                if layer_type == "linear_attention":
+                    gguf_to_hf_name_map[f"blk.{idx}.ssm_dt.bias"] = (
+                        f"model.layers.{idx}.linear_attn.dt_bias"
+                    )
         if model_type in ("deepseek_v3", "deepseek_v2"):
             model_type = "deepseek2"
             for idx in range(config.num_hidden_layers):
@@ -232,6 +246,32 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 for x in unmapped_params
                 if not any(regex.fullmatch(p, x) for p in sideload_params)
             ]
+        if unmapped_params:
+            # Multimodal checkpoints (e.g. gemma-4) carry vision-tower / vision
+            # tensors that the text-only vLLM model never loads; skip them
+            # instead of failing the whole load (restores the pre-plugin
+            # lenient behavior).
+            _mm = [
+                x
+                for x in unmapped_params
+                if any(
+                    s in x
+                    for s in (
+                        "vision_tower",
+                        "embed_vision",
+                        "vision_model",
+                        "multi_modal_projector",
+                    )
+                )
+            ]
+            if _mm:
+                logger.warning(
+                    "Skipping %d unmapped multimodal GGUF params for text-only "
+                    "load (e.g. %s)",
+                    len(_mm),
+                    _mm[:3],
+                )
+                unmapped_params = [x for x in unmapped_params if x not in _mm]
         if unmapped_params:
             raise RuntimeError(
                 f"Failed to map GGUF parameters "

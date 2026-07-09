@@ -299,6 +299,58 @@ def test_register_sets_engine_args_for_nonstandard_local_gguf_quant(
     assert captured["hf_config_path"] == str(qwen_path)
 
 
+def test_register_sets_qwen35_prefix_cache_mamba_block_size(
+    tmp_path, monkeypatch
+):
+    register()
+    captured = {}
+    qwen_path = tmp_path / "Qwen3.6-27B-UD-Q4_K_XL.gguf"
+    qwen_path.write_bytes(b"GGUF")
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    monkeypatch.setattr(
+        "vllm_gguf_plugin.plugin._get_gguf_architecture",
+        lambda model: "qwen35",
+    )
+    engine_args = EngineArgs(model=str(qwen_path), block_size=32)
+
+    engine_args.create_model_config()
+
+    assert engine_args.mamba_block_size == 32
+
+
+def test_register_preserves_qwen35_mamba_block_size_without_prefix_cache(
+    tmp_path, monkeypatch
+):
+    register()
+    captured = {}
+    qwen_path = tmp_path / "Qwen3.6-27B-UD-Q4_K_XL.gguf"
+    qwen_path.write_bytes(b"GGUF")
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    monkeypatch.setattr(
+        "vllm_gguf_plugin.plugin._get_gguf_architecture",
+        lambda model: "qwen35",
+    )
+    engine_args = EngineArgs(
+        model=str(qwen_path),
+        enable_prefix_caching=False,
+        mamba_block_size=1024,
+    )
+
+    engine_args.create_model_config()
+
+    assert engine_args.mamba_block_size == 1024
+
+
 def test_register_skips_speculator_probe_for_gguf():
     register()
 

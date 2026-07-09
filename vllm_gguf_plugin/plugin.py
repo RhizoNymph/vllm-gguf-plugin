@@ -3,8 +3,10 @@
 from functools import wraps
 from pathlib import Path
 
+import gguf
 import vllm.engine.arg_utils as arg_utils_module
 import vllm.transformers_utils.config as config_module
+from vllm.config.cache import CacheConfig
 from vllm.config.load import LoadConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.quantization import (
@@ -80,6 +82,36 @@ def _resolve_gguf_weights(model: str) -> str:
     return model_str
 
 
+def _get_gguf_architecture(model: str) -> str | None:
+    if not check_gguf_file(model):
+        return None
+    try:
+        reader = gguf.GGUFReader(model)
+    except Exception:
+        return None
+    general_arch = reader.fields.get("general.architecture")
+    if general_arch is None:
+        return None
+    value = general_arch.contents()
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+def _patch_qwen35_mamba_cache_args(
+    engine_args: EngineArgs,
+    gguf_weights: str,
+) -> None:
+    if _get_gguf_architecture(gguf_weights) not in ("qwen35", "qwen35moe"):
+        return
+    if engine_args.enable_prefix_caching is False:
+        return
+
+    block_size = engine_args.block_size or CacheConfig.DEFAULT_BLOCK_SIZE
+    if engine_args.mamba_block_size != block_size:
+        engine_args.mamba_block_size = block_size
+
+
 def _resolve_local_gguf_dir(model: str) -> str:
     """Resolve a GGUF reference to the local directory containing the ``.gguf``.
 
@@ -127,6 +159,7 @@ def _patch_engine_args() -> None:
                 self.model_weights = gguf_weights
             if self.served_model_name is None:
                 self.served_model_name = [gguf_model]
+            _patch_qwen35_mamba_cache_args(self, gguf_weights)
             hf_config_path = self.hf_config_path
             if hf_config_path is None and check_gguf_file(str(gguf_weights)):
                 self.hf_config_path = gguf_weights

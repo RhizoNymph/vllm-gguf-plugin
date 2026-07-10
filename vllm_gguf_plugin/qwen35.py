@@ -12,6 +12,7 @@ def register_qwen35_gguf_support() -> None:
     from transformers import configuration_utils as _cu
     from transformers import modeling_gguf_pytorch_utils as _mgu
     from transformers.integrations import ggml as _ggml
+    from transformers.models.auto import tokenization_auto as _ta
 
     qwen35_mapping = {
         "context_length": "max_position_embeddings",
@@ -68,6 +69,7 @@ def register_qwen35_gguf_support() -> None:
 
     _mgu.load_gguf_checkpoint = _patched_load
     _cu.load_gguf_checkpoint = _patched_load
+    _ta.load_gguf_checkpoint = _patched_load
     _PATCHED = True
 
 

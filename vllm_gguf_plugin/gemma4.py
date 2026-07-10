@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+_CONFIG_PATCHED = False
 _TOKENIZER_PATCHED = False
 
 
@@ -37,28 +38,33 @@ def _patch_gemma4_config() -> None:
     from transformers import modeling_gguf_pytorch_utils as _mgu
     from transformers.integrations import ggml as _ggml
 
-    if "gemma4" in _ggml.GGUF_CONFIG_MAPPING:
+    global _CONFIG_PATCHED
+    if _CONFIG_PATCHED:
         return
 
-    _ggml.GGUF_CONFIG_MAPPING["gemma4"] = {
-        "context_length": "max_position_embeddings",
-        "block_count": "num_hidden_layers",
-        "feed_forward_length": "intermediate_size",
-        "embedding_length": "hidden_size",
-        "rope.dimension_count": None,
-        "attention.head_count": "num_attention_heads",
-        "attention.layer_norm_rms_epsilon": "rms_norm_eps",
-        "attention.sliding_window": "sliding_window",
-        "attention.shared_kv_layers": "num_kv_shared_layers",
-        # NOTE: final_logit_softcapping intentionally not mapped. llama.cpp's
-        # gemma4 GGUFs carry a value of 30.0 inherited from gemma2/3, but
-        # the HF Gemma4TextConfig defaults to None and applying it here
-        # saturates all token logits to ±30 (hidden state RMS is large), so
-        # softmax collapses to ~uniform. Leave it unset.
-        "embedding_length_per_layer_input": "hidden_size_per_layer_input",
-        "vocab_size": "vocab_size",
-    }
-    _mgu.GGUF_SUPPORTED_ARCHITECTURES.append("gemma4")
+    _ggml.GGUF_CONFIG_MAPPING.setdefault(
+        "gemma4",
+        {
+            "context_length": "max_position_embeddings",
+            "block_count": "num_hidden_layers",
+            "feed_forward_length": "intermediate_size",
+            "embedding_length": "hidden_size",
+            "rope.dimension_count": None,
+            "attention.head_count": "num_attention_heads",
+            "attention.layer_norm_rms_epsilon": "rms_norm_eps",
+            "attention.sliding_window": "sliding_window",
+            "attention.shared_kv_layers": "num_kv_shared_layers",
+            # NOTE: final_logit_softcapping intentionally not mapped. llama.cpp's
+            # gemma4 GGUFs carry a value of 30.0 inherited from gemma2/3, but
+            # the HF Gemma4TextConfig defaults to None and applying it here
+            # saturates all token logits to ±30 (hidden state RMS is large), so
+            # softmax collapses to ~uniform. Leave it unset.
+            "embedding_length_per_layer_input": "hidden_size_per_layer_input",
+            "vocab_size": "vocab_size",
+        },
+    )
+    if "gemma4" not in _mgu.GGUF_SUPPORTED_ARCHITECTURES:
+        _mgu.GGUF_SUPPORTED_ARCHITECTURES.append("gemma4")
     # convert_gguf_tokenizer keys by the raw GGUF architecture string
     # ("gemma4"), while elsewhere we use the renamed model_type
     # ("gemma4_text"). Register both so either lookup path works.
@@ -70,7 +76,7 @@ def _patch_gemma4_config() -> None:
     def _patched_load(*args, **kwargs):
         parsed = _orig_load(*args, **kwargs)
         cfg = parsed.get("config", {})
-        if cfg.get("model_type") != "gemma4":
+        if cfg.get("model_type") not in ("gemma4", "gemma4_text"):
             return parsed
         gguf_path = args[0] if args else kwargs.get("gguf_checkpoint_path")
         cfg["model_type"] = "gemma4_text"
@@ -78,6 +84,10 @@ def _patch_gemma4_config() -> None:
             cfg["architectures"] = ["Gemma4ForCausalLM"]
         reader = gguf.GGUFReader(gguf_path)
         fields = reader.fields
+        tensor_names = {t.name for t in reader.tensors}
+        if not any("per_layer" in name or "layer_input" in name for name in tensor_names):
+            cfg["hidden_size_per_layer_input"] = 0
+            cfg["vocab_size_per_layer_input"] = 0
         pat_field = fields.get("gemma4.attention.sliding_window_pattern")
         nkv_field = fields.get("gemma4.attention.head_count_kv")
         layer_pat = None
@@ -113,7 +123,6 @@ def _patch_gemma4_config() -> None:
         # an attn_v tensor, the checkpoint uses shared K/V weights for
         # full-attention layers.
         if layer_pat is not None:
-            tensor_names = {t.name for t in reader.tensors}
             full_blocks_missing_v = any(
                 not p and f"blk.{i}.attn_v.weight" not in tensor_names
                 for i, p in enumerate(layer_pat)
@@ -153,6 +162,10 @@ def _patch_gemma4_config() -> None:
     from transformers import configuration_utils as _cu
 
     _cu.load_gguf_checkpoint = _patched_load
+    from transformers.models.auto import tokenization_auto as _ta
+
+    _ta.load_gguf_checkpoint = _patched_load
+    _CONFIG_PATCHED = True
 
 
 def _patch_gemma4_tokenizer() -> None:

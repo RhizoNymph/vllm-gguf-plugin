@@ -93,12 +93,16 @@ def test_gguf_linear_uses_weight_loader_v2(monkeypatch):
     assert len(layer.qweight.data_container) == 2
     assert isinstance(layer.qweight_type, GGUFUninitializedParameter)
 
+    uninitialized_qweight = layer.qweight
     layer.quant_method.process_weights_after_loading(layer)
 
     assert isinstance(layer.qweight, GGUFWeightParameter)
     assert isinstance(layer.qweight_type, GGUFWeightTypeParameter)
     assert layer.qweight.shard_id == [0, 1]
     assert layer.qweight_type.shard_weight_type == {0: 3, 1: 4}
+    assert uninitialized_qweight.data_container == []
+    assert uninitialized_qweight.shard_id == []
+    assert uninitialized_qweight.shard_id_map == {}
 
 
 def test_gguf_embedding_uses_plugin_weight_loader(monkeypatch):

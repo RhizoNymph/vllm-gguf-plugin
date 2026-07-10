@@ -338,9 +338,16 @@ def _materialize_gguf_weight_parameter(
         output_dim=raw_param.output_dim,
         tensor_shape=raw_param.tensor_shape,
     )
-    qweight.data_container = list(raw_param.data_container)
-    qweight.shard_id = list(raw_param.shard_id)
-    qweight.shard_id_map = dict(raw_param.shard_id_map)
+    # Transfer shard ownership instead of copying the containers. The source
+    # uninitialized parameter can remain referenced by vLLM during loading;
+    # copied lists would therefore retain every GPU shard after the fused
+    # parameter has been materialized and padded.
+    qweight.data_container = raw_param.data_container
+    qweight.shard_id = raw_param.shard_id
+    qweight.shard_id_map = raw_param.shard_id_map
+    raw_param.data_container = []
+    raw_param.shard_id = []
+    raw_param.shard_id_map = {}
     if hasattr(raw_param, "ignore_warning"):
         qweight.ignore_warning = raw_param.ignore_warning
     layer.register_parameter(param_name, qweight)

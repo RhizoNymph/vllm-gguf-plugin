@@ -140,7 +140,10 @@ def is_local_gguf_quant(model: str | Path) -> bool:
     if ":" not in model:
         return False
     path_part, quant_type = model.rsplit(":", 1)
-    return Path(path_part).is_dir() and is_valid_gguf_quant_type(quant_type)
+    return Path(path_part).is_dir() and (
+        is_valid_gguf_quant_type(quant_type)
+        or is_nonstandard_gguf_quant_type(quant_type)
+    )
 
 
 def is_gguf(model: str | Path) -> bool:

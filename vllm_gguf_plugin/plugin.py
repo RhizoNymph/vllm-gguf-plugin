@@ -7,11 +7,7 @@ import vllm.engine.arg_utils as arg_utils_module
 import vllm.transformers_utils.config as config_module
 from vllm.config.load import LoadConfig
 from vllm.engine.arg_utils import EngineArgs
-from vllm.model_executor.layers.quantization import (
-    QUANTIZATION_METHODS,
-    get_quantization_config,
-    register_quantization_config,
-)
+from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.model_loader import (
     _LOAD_FORMAT_TO_MODEL_LOADER,
     get_model_loader,
@@ -29,9 +25,10 @@ from .gguf_utils import (
     split_remote_gguf,
 )
 from .loader import GGUFModelLoader
+from .quantization import DiffusionGGUFConfig, GGUFConfig
 from .qwen35 import register_qwen35_gguf_support
-from .quantization import GGUFConfig
 from .weight_utils import download_gguf, resolve_local_gguf
+from .weights_adapter.diffusion.integration import _patch_diffusers_loader
 
 OOTGGUFConfig = GGUFConfig
 OOTGGUFModelLoader = GGUFModelLoader
@@ -159,13 +156,19 @@ def _patch_speculator_probe() -> None:
     config_module._gguf_speculator_probe_patched = True
 
 
+def _register_omni_diffusion_quantization() -> None:
+    try:
+        from vllm_omni.quantization import register_quantization_override
+    except ImportError:
+        return
+
+    register_quantization_override("gguf", lambda **kw: DiffusionGGUFConfig(**kw))
+
+
 def register() -> None:
     """Register the out-of-tree GGUF integration."""
-    if (
-        "gguf" not in QUANTIZATION_METHODS
-        or get_quantization_config("gguf") is not GGUFConfig
-    ):
-        register_quantization_config("gguf")(GGUFConfig)
+    register_quantization_config("gguf")(GGUFConfig)
+    _register_omni_diffusion_quantization()
 
     if "gguf" not in _LOAD_FORMAT_TO_MODEL_LOADER or not isinstance(
         get_model_loader(LoadConfig(load_format="gguf")), GGUFModelLoader
@@ -182,3 +185,4 @@ def register() -> None:
     _patch_speculator_probe()
     register_gemma4_gguf_support()
     register_qwen35_gguf_support()
+    _patch_diffusers_loader()

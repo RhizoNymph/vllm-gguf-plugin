@@ -40,7 +40,28 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         return True
 
     def patch_hf_config(self, model_path: str, hf_config: PretrainedConfig):
-        return maybe_patch_hf_config_from_gguf(model_path, hf_config)
+        hf_config = maybe_patch_hf_config_from_gguf(model_path, hf_config)
+        if hf_config.model_type in ("qwen3_5_text", "qwen3_5_moe_text"):
+            self._patch_qwen35_layer_types_from_gguf(model_path, hf_config)
+        return hf_config
+
+    @staticmethod
+    def _patch_qwen35_layer_types_from_gguf(
+        model_path: str,
+        hf_config: PretrainedConfig,
+    ) -> None:
+        layer_types = list(getattr(hf_config, "layer_types", []))
+        if not layer_types:
+            return
+        tensor_names: set[str] = set()
+        for gguf_file in GGUFWeightsAdapter._get_all_gguf_files(model_path):
+            tensor_names.update(t.name for t in gguf.GGUFReader(gguf_file).tensors)
+        for idx in range(min(len(layer_types), hf_config.num_hidden_layers)):
+            if f"blk.{idx}.attn_qkv.weight" in tensor_names:
+                layer_types[idx] = "linear_attention"
+            elif f"blk.{idx}.attn_q.weight" in tensor_names:
+                layer_types[idx] = "full_attention"
+        hf_config.layer_types = layer_types
 
     def build_name_map(self, model_config: ModelConfig) -> dict[str, str]:
         config = model_config.hf_config
@@ -284,7 +305,20 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[tuple[str, torch.Tensor]]:
         for hf_name, weight in weights:
-            yield hf_name, self.transform_weight(hf_name, weight)
+            yield self.transform_weight(hf_name, weight)
+
+    def transform_weight(
+        self,
+        hf_name: str,
+        weight: torch.Tensor,
+    ) -> tuple[str, torch.Tensor]:
+        if (
+            ".linear_attn.conv1d.weight" in hf_name
+            and weight.ndim == 2
+            and self.config.model_type in ("qwen3_5_text", "qwen3_5_moe_text")
+        ):
+            weight = weight.unsqueeze(1)
+        return hf_name, weight
 
     @staticmethod
     def _get_all_gguf_files(model_path: str) -> list[str]:
@@ -334,11 +368,22 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
 
     @staticmethod
     def get_unquantized_modules(weight_type_map: dict[str, str]) -> list[str]:
-        return [
+        modules = [
             name.removesuffix(".weight")
             for name, weight_type in weight_type_map.items()
             if weight_type in ("F32", "F16", "BF16") and name.endswith(".weight")
         ]
+        module_set = set(modules)
+        for module in tuple(module_set):
+            if module.endswith(".linear_attn.in_proj_qkv"):
+                sibling = module.removesuffix("in_proj_qkv")
+                if f"{sibling}in_proj_z" in module_set:
+                    modules.append(f"{sibling}in_proj_qkvz")
+            elif module.endswith(".linear_attn.in_proj_b"):
+                sibling = module.removesuffix("in_proj_b")
+                if f"{sibling}in_proj_a" in module_set:
+                    modules.append(f"{sibling}in_proj_ba")
+        return modules
 
     def prepare_loading(
         self,

@@ -305,20 +305,28 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[tuple[str, torch.Tensor]]:
         for hf_name, weight in weights:
-            yield self.transform_weight(hf_name, weight)
+            weight = self.transform_weight(hf_name, weight)
+            if weight.ndim == 3 and ".experts.0." in hf_name:
+                for expert_id, expert_weight in enumerate(weight.unbind()):
+                    expert_name = hf_name.replace(
+                        ".experts.0.", f".experts.{expert_id}."
+                    )
+                    yield expert_name, expert_weight
+            else:
+                yield hf_name, weight
 
     def transform_weight(
         self,
         hf_name: str,
         weight: torch.Tensor,
-    ) -> tuple[str, torch.Tensor]:
+    ) -> torch.Tensor:
         if (
             ".linear_attn.conv1d.weight" in hf_name
             and weight.ndim == 2
             and self.config.model_type in ("qwen3_5_text", "qwen3_5_moe_text")
         ):
             weight = weight.unsqueeze(1)
-        return hf_name, weight
+        return weight
 
     @staticmethod
     def _get_all_gguf_files(model_path: str) -> list[str]:

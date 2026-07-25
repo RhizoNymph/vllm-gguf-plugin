@@ -29,6 +29,24 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+# Qwen3.5 RMSNorms whose HF weights are zero-centered — the module applies
+# (1 + w). ``linear_attn.norm`` is deliberately absent: the gated RMSNorm
+# inside the delta-net stores a conventional scale and needs no adjustment.
+_ZERO_CENTERED_NORM_SUFFIXES = (
+    ".input_layernorm.weight",
+    ".post_attention_layernorm.weight",
+    ".self_attn.q_norm.weight",
+    ".self_attn.k_norm.weight",
+)
+
+
+def _is_zero_centered_norm(hf_name: str) -> bool:
+    if hf_name.endswith(_ZERO_CENTERED_NORM_SUFFIXES):
+        return True
+    # Final trunk norm; must not catch ``...linear_attn.norm.weight``.
+    return hf_name.endswith("model.norm.weight")
+
+
 class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
     """Default adapter for GGUF models."""
 
@@ -324,12 +342,147 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         hf_name: str,
         weight: torch.Tensor,
     ) -> torch.Tensor:
-        if (
-            ".linear_attn.conv1d.weight" in hf_name
-            and weight.ndim == 2
-            and self.config.model_type in ("qwen3_5_text", "qwen3_5_moe_text")
-        ):
+        is_qwen35 = self.config.model_type in ("qwen3_5_text", "qwen3_5_moe_text")
+        if ".linear_attn.conv1d.weight" in hf_name and weight.ndim == 2 and is_qwen35:
             weight = weight.unsqueeze(1)
+        if is_qwen35 and _is_zero_centered_norm(hf_name):
+            # Qwen3.5's RMSNorms are zero-centered: the checkpoint stores w and
+            # the kernel applies (1 + w). ggml has no such convention, so the
+            # conversion folds the +1 into the stored value. Loading that
+            # directly makes vLLM add 1 a second time, roughly doubling every
+            # norm scale. Verified against the HF checkpoint: ggml's value is
+            # exactly hf + 1.
+            weight = weight - 1.0
+        if hf_name.endswith(".linear_attn.A_log") and is_qwen35:
+            # ggml stores the gated-delta-net decay already exponentiated, as
+            # A = -exp(A_log); vLLM's kernels take A_log and exponentiate it
+            # themselves. Verified against the HF checkpoint of the same
+            # model: -exp(A_log) reproduces ggml's ssm_a exactly. Passing the
+            # stored value through unchanged applies exp twice.
+            if bool((weight < 0).all()):
+                weight = weight.neg().log()
+        if is_qwen35:
+            weight = self._reorder_qwen35_value_heads(hf_name, weight)
+        return weight
+
+    def _qwen35_gdn_dims(self) -> tuple[int, int, int, int] | None:
+        """(num_k_heads, num_v_heads, value_head_dim, key_dim) or None."""
+        cfg = self.config.get_text_config()
+        try:
+            nk = int(cfg.linear_num_key_heads)
+            nv = int(cfg.linear_num_value_heads)
+            hv = int(cfg.linear_value_head_dim)
+            hk = int(cfg.linear_key_head_dim)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if nk <= 0 or nv <= 0 or nv % nk:
+            return None
+        return nk, nv, hv, nk * hk
+
+    def _assert_head_block_aligned(self, hf_name: str, head_dim: int) -> None:
+        """Fail loudly if a value head does not cover whole quant blocks.
+
+        Only relevant when re-indexing along a packed row. Silently permuting
+        a half-block would corrupt the scales and produce plausible-looking
+        garbage, which is the failure mode this whole fix exists to remove.
+        """
+        wtype = (getattr(self, "_weight_type_map", None) or {}).get(hf_name)
+        if wtype is None:
+            return
+        try:
+            qtype = gguf.GGMLQuantizationType[wtype]
+            block_size, _ = gguf.GGML_QUANT_SIZES[qtype]
+        except (KeyError, AttributeError):
+            return
+        if block_size > 1 and head_dim % block_size:
+            raise RuntimeError(
+                f"Cannot re-index Qwen3.5 value heads for {hf_name}: a "
+                f"{head_dim}-element head does not cover whole {wtype} blocks "
+                f"of {block_size} elements, so permuting the packed row would "
+                f"split a quantisation block. This model needs out_proj "
+                f"dequantised at load time before re-indexing."
+            )
+
+    def _reorder_qwen35_value_heads(
+        self,
+        hf_name: str,
+        weight: torch.Tensor,
+    ) -> torch.Tensor:
+        """Re-index gated-delta-net value heads from ggml order to HF order.
+
+        ggml lays the value heads out strided as ``r * num_k_heads + g``; HF
+        groups them under their key head as ``g * ratio + r``. The two agree
+        only when num_v_heads == num_k_heads, so this is invisible on models
+        with a 1:1 ratio and scrambles which value head is paired with which
+        key head on every other model.
+
+        Rows are permuted whole, which is safe on packed quantised data. The
+        out_proj case permutes along the *input* axis and so moves bytes
+        inside each row; that is only valid when a head spans a whole number
+        of quantisation blocks, which is checked before use.
+        """
+        dims = self._qwen35_gdn_dims()
+        if dims is None:
+            return weight
+        nk, nv, hv, key_dim = dims
+        ratio = nv // nk
+        if ratio == 1:
+            return weight
+
+        # Quantised tensors reach us renamed: the weight iterator rewrites
+        # ``<x>.weight`` to ``<x>.qweight`` (and emits a separate
+        # ``<x>.qweight_type`` scalar). Re-indexing is a pure layout change,
+        # valid on packed bytes as long as whole rows move, so match both
+        # spellings. The scale/offset conversions above deliberately do *not*
+        # do this: applying arithmetic to packed bytes would corrupt them,
+        # and those tensors are only ever stored unquantised.
+        if hf_name.endswith(".qweight_type"):
+            return weight
+        if hf_name.endswith(".qweight"):
+            hf_name = hf_name[: -len(".qweight")] + ".weight"
+
+        def rows(t: torch.Tensor, per_head: int) -> torch.Tensor:
+            head_rows = per_head
+            tail = t.shape[1:]
+            return (
+                t.reshape(ratio, nk, head_rows, *tail)
+                .transpose(0, 1)
+                .reshape(nv * head_rows, *tail)
+            )
+
+        if hf_name.endswith((".linear_attn.A_log", ".linear_attn.dt_bias")):
+            return rows(weight, 1)
+        if hf_name.endswith((".linear_attn.in_proj_b.weight",
+                             ".linear_attn.in_proj_a.weight")):
+            return rows(weight, 1)
+        if hf_name.endswith(".linear_attn.in_proj_z.weight"):
+            return rows(weight, hv)
+        if hf_name.endswith(".linear_attn.in_proj_qkv.weight"):
+            # Only the trailing value block is value-head indexed.
+            qk, v = weight[:2 * key_dim], weight[2 * key_dim:]
+            return torch.cat([qk, rows(v, hv)], dim=0)
+        if hf_name.endswith(".linear_attn.conv1d.weight"):
+            qk, v = weight[:2 * key_dim], weight[2 * key_dim:]
+            return torch.cat([qk, rows(v, hv)], dim=0)
+        if hf_name.endswith(".linear_attn.out_proj.weight"):
+            # Value heads index the input axis, i.e. within each packed row,
+            # so a head must cover a whole number of quantisation blocks.
+            # Byte divisibility alone is not enough: Q5_K packs 256 elements
+            # per block, so a 128-element head is half a block and reordering
+            # would split it.
+            self._assert_head_block_aligned(hf_name, hv)
+            width = weight.shape[1]
+            if width % nv:
+                raise RuntimeError(
+                    f"Cannot re-index Qwen3.5 value heads for {hf_name}: row "
+                    f"width {width} is not divisible by {nv} value heads."
+                )
+            per_head = width // nv
+            return (
+                weight.reshape(-1, ratio, nk, per_head)
+                .transpose(1, 2)
+                .reshape(-1, width)
+            )
         return weight
 
     @staticmethod
@@ -410,6 +563,10 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             model_path, model_config.hf_config, gguf_to_hf_name_map
         )
         weight_type_map = self.get_weight_type_map(model_path, gguf_to_hf_name_map)
+        # Kept for transform-time block-alignment checks (see
+        # _reorder_qwen35_value_heads); keyed by HF name with a ".weight"
+        # suffix, before the iterator rewrites it to ".qweight".
+        self._weight_type_map = weight_type_map
         self.load_spec = GGUFLoadSpec(
             weights_source=self._get_all_gguf_files(model_path),
             gguf_to_hf_name_map=gguf_to_hf_name_map,

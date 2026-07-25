@@ -57,6 +57,39 @@ the marker with `get_mamba_state_shape_from_config`,
 cannot advertise hybridness without supplying the shapes needed to size its
 cache.
 
+## Value conventions ggml does not share with HF
+
+Three conversions are required on load. All were verified element-wise against
+the HF release of the same checkpoint; the F32 ones reproduce it exactly.
+
+| Tensor | Conversion | Why |
+|---|---|---|
+| RMSNorm weights | subtract 1 | Qwen3.5 norms are zero-centered (the module applies `1 + w`); ggml folds the `+1` in, so vLLM would apply it twice. Excludes `linear_attn.norm`, which stores a conventional scale. |
+| `A_log` | `log(-x)` | ggml stores the decay pre-exponentiated as `A = -exp(A_log)`; the kernels exponentiate it themselves. |
+| every value-head-indexed tensor | re-index | ggml strides value heads `r * num_k_heads + g`; HF groups them `g * ratio + r`. |
+
+The re-indexing covers `A_log`, `dt_bias`, `in_proj_a`, `in_proj_b`, the value
+block of `conv1d` and `in_proj_qkv`, all of `in_proj_z` (rows), and `out_proj`
+(columns — value heads index its *input* axis). `norm` is indexed by head
+*dimension*, not head, and must not move.
+
+Two properties make this easy to get wrong:
+
+- **A 1:1 model cannot detect a mistake.** When `num_v_heads == num_k_heads`
+  the two orderings are identical, so a 0.8B model loads and generates
+  fluently while every larger sibling is silently scrambled.
+- **Quantised tensors arrive renamed.** The weight iterator rewrites
+  `<x>.weight` to `<x>.qweight`. Matching only `.weight` skips exactly the
+  projections — and leaving the projections un-reordered while the recurrent
+  state *is* reordered is worse than doing nothing, because the two halves of
+  each layer then disagree.
+
+Re-indexing is a layout change and is safe on packed data when whole rows
+move. `out_proj` permutes within a row, so a head must span whole
+quantisation blocks; `_assert_head_block_aligned` refuses rather than
+splitting one (Q5_K packs 256 elements, so a 128-element head is half a
+block).
+
 ## What the plugin must not do
 
 Earlier revisions carried `_patch_qwen35_mamba_cache_args`, which set

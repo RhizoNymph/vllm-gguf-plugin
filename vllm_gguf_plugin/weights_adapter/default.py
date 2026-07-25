@@ -235,9 +235,9 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 # HF tensors whose name doesn't end in ".weight"/".bias"
                 # (e.g. Gemma4's registered ``layer_scalar`` buffer) are still
                 # stored in GGUF with a ".weight" suffix appended. For gemma4
-                # default to "weight" — otherwise the lookup produces a
-                # trailing-dot key (``...layer_output_scale.``) that silently
-                # never matches the actual GGUF tensor.
+                # default to "weight"; elsewhere the GGUF tensor is stored
+                # bare (e.g. qwen35's ``blk.N.ssm_a`` backing ``A_log``) and
+                # gets no suffix at all.
                 base_name = hf_name
                 suffix = "weight" if model_type == "gemma4" else ""
                 if base_name.endswith("_weight"):
@@ -250,7 +250,11 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 gguf_name = text_name_map.get_name(base_name)
             if gguf_name is None:
                 return None
-            return gguf_name + "." + suffix
+            # An empty suffix means the GGUF tensor is stored bare. Joining
+            # unconditionally would yield a trailing-dot key that matches no
+            # tensor, and an unmatched key is silent: the parameter keeps its
+            # initialisation and the model loads without a single warning.
+            return f"{gguf_name}.{suffix}" if suffix else gguf_name
 
         unmapped_params = []
         for hf_name in state_dict:

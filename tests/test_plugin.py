@@ -312,9 +312,15 @@ def test_register_sets_engine_args_for_nonstandard_local_gguf_quant(
     assert captured["hf_config_path"] == str(qwen_path)
 
 
-def test_register_sets_qwen35_prefix_cache_mamba_block_size(
-    tmp_path, monkeypatch
-):
+def test_register_leaves_qwen35_mamba_block_size_unset(tmp_path, monkeypatch):
+    """The plugin must not pin mamba_block_size for hybrid Qwen3.5 models.
+
+    Assigning engine_args.mamba_block_size sets
+    CacheConfig.user_specified_mamba_block_size, which makes
+    Platform._align_hybrid_block_size() honour the value as a deliberate user
+    choice and skip computing a size whose page geometry matches the attention
+    layers. Leaving it None is what lets that alignment run.
+    """
     register()
     captured = {}
     qwen_path = tmp_path / "Qwen3.6-27B-UD-Q4_K_XL.gguf"
@@ -333,7 +339,44 @@ def test_register_sets_qwen35_prefix_cache_mamba_block_size(
 
     engine_args.create_model_config()
 
-    assert engine_args.mamba_block_size == 32
+    assert engine_args.mamba_block_size is None
+
+
+def test_register_pins_tokenizer_to_resolved_gguf(tmp_path, monkeypatch):
+    """The tokenizer must name the exact .gguf, not the directory.
+
+    create_model_config() rewrites ``model`` to the parent directory, so a
+    directory holding several .gguf files would otherwise leave the tokenizer
+    to be re-derived by globbing — yielding whichever file sorts first.
+    """
+    register()
+    qwen_path = tmp_path / "Qwen3.6-27B-UD-Q4_K_XL.gguf"
+    qwen_path.write_bytes(b"GGUF")
+    # A sibling that sorts ahead of it: uppercase precedes lowercase and
+    # 'L' < 'Q', so a glob-and-sort would pick this one instead.
+    (tmp_path / "Laguna-XS-2.1-Q4_K_M.gguf").write_bytes(b"GGUF")
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", lambda **kwargs: kwargs)
+    engine_args = EngineArgs(model=str(qwen_path))
+
+    engine_args.create_model_config()
+
+    assert engine_args.tokenizer == str(qwen_path)
+    assert engine_args.model == str(tmp_path)
+
+
+def test_register_keeps_explicit_tokenizer(tmp_path, monkeypatch):
+    """An explicitly supplied tokenizer is never overridden by the pin."""
+    register()
+    qwen_path = tmp_path / "Qwen3.6-27B-UD-Q4_K_XL.gguf"
+    qwen_path.write_bytes(b"GGUF")
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", lambda **kwargs: kwargs)
+    engine_args = EngineArgs(model=str(qwen_path), tokenizer="Qwen/Qwen3.6-27B")
+
+    engine_args.create_model_config()
+
+    assert engine_args.tokenizer == "Qwen/Qwen3.6-27B"
 
 
 def test_register_preserves_qwen35_mamba_block_size_without_prefix_cache(

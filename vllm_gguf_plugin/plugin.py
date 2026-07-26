@@ -6,7 +6,6 @@ from pathlib import Path
 import gguf
 import vllm.engine.arg_utils as arg_utils_module
 import vllm.transformers_utils.config as config_module
-from vllm.config.cache import CacheConfig
 from vllm.config.load import LoadConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.quantization import register_quantization_config
@@ -95,20 +94,6 @@ def _get_gguf_architecture(model: str) -> str | None:
     return str(value)
 
 
-def _patch_qwen35_mamba_cache_args(
-    engine_args: EngineArgs,
-    gguf_weights: str,
-) -> None:
-    if _get_gguf_architecture(gguf_weights) not in ("qwen35", "qwen35moe"):
-        return
-    if engine_args.enable_prefix_caching is False:
-        return
-
-    block_size = engine_args.block_size or CacheConfig.DEFAULT_BLOCK_SIZE
-    if engine_args.mamba_block_size != block_size:
-        engine_args.mamba_block_size = block_size
-
-
 def _resolve_local_gguf_dir(model: str) -> str:
     """Resolve a GGUF reference to the local directory containing the ``.gguf``.
 
@@ -156,15 +141,23 @@ def _patch_engine_args() -> None:
                 self.model_weights = gguf_weights
             if self.served_model_name is None:
                 self.served_model_name = [gguf_model]
-            _patch_qwen35_mamba_cache_args(self, gguf_weights)
             hf_config_path = self.hf_config_path
             if hf_config_path is None and check_gguf_file(str(gguf_weights)):
                 self.hf_config_path = gguf_weights
+            tokenizer = self.tokenizer if isinstance(self.tokenizer, str) else None
             self.model = _get_gguf_config_source(
                 gguf_weights,
-                self.tokenizer if isinstance(self.tokenizer, str) else None,
+                tokenizer,
                 hf_config_path,
             )
+            # ``self.model`` is now the *directory* holding the weights, which
+            # loses track of which .gguf was asked for. Pin the tokenizer to
+            # the resolved file so it is never re-derived by globbing that
+            # directory — a dir holding several .gguf files would otherwise
+            # yield whichever sorts first, silently building the tokenizer
+            # from an unrelated model.
+            if tokenizer is None:
+                self.tokenizer = gguf_weights
         return original_create_model_config(self, *args, **kwargs)
 
     EngineArgs.create_model_config = create_model_config

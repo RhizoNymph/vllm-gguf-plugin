@@ -27,6 +27,7 @@ def register_qwen35_gguf_support() -> None:
         "attention.head_count_kv": "num_key_value_heads",
         "attention.layer_norm_rms_epsilon": "rms_norm_eps",
         "full_attention_interval": "full_attention_interval",
+        "nextn_predict_layers": "num_nextn_predict_layers",
         "ssm.conv_kernel": "linear_conv_kernel_dim",
         "ssm.state_size": "linear_key_head_dim",
         "ssm.group_count": "linear_num_key_heads",
@@ -69,11 +70,13 @@ def register_qwen35_gguf_support() -> None:
             cfg["model_type"] = "qwen3_5_text"
             cfg["architectures"] = ["Qwen3_5ForCausalLM"]
             _derive_linear_value_heads(cfg)
+            _exclude_mtp_layers(cfg)
         elif cfg.get("model_type") == "qwen35moe":
             cfg["model_type"] = "qwen3_5_moe_text"
             cfg["architectures"] = ["Qwen3_5MoeForCausalLM"]
             cfg.setdefault("norm_topk_prob", True)
             _derive_linear_value_heads(cfg)
+            _exclude_mtp_layers(cfg)
         return parsed
 
     _mgu.load_gguf_checkpoint = _patched_load
@@ -83,6 +86,29 @@ def register_qwen35_gguf_support() -> None:
     # raw qwen35/qwen35moe model_type and AutoConfig rejects it.
     _ta.load_gguf_checkpoint = _patched_load
     _PATCHED = True
+
+
+def _exclude_mtp_layers(cfg: dict) -> None:
+    """Drop the multi-token-prediction blocks from the decoder layer count.
+
+    ggml's ``block_count`` counts every block in the file, including the
+    trailing MTP/nextn blocks; HF's ``num_hidden_layers`` counts only the
+    decoder stack. Leaving the ggml value in place makes vLLM build extra
+    layers that no checkpoint tensor maps onto, so they keep their
+    initialisation and quietly corrupt the residual stream — the model loads
+    without a single warning and emits noise.
+
+    MTP weights are skipped at load time, so the layers are not built here;
+    the count is zeroed rather than carried.
+    """
+    total = cfg.get("num_hidden_layers")
+    mtp = cfg.get("num_nextn_predict_layers")
+    if not isinstance(total, int) or not isinstance(mtp, int):
+        return
+    if not 0 < mtp < total:
+        return
+    cfg["num_hidden_layers"] = total - mtp
+    cfg["num_nextn_predict_layers"] = 0
 
 
 def _derive_linear_value_heads(cfg: dict) -> None:

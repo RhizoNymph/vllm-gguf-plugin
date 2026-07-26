@@ -204,7 +204,13 @@ def _patch_gemma4_tokenizer() -> None:
             if candidate.is_file():
                 gguf_path = candidate
         elif base.suffix == ".gguf" and base.is_file():
+            # An exact file was requested. transformers cannot take a bare
+            # .gguf path — it resolves the tokenizer as (repo_or_dir,
+            # gguf_file) — so restate it in that form rather than letting the
+            # directory branch below re-guess which file was meant.
             gguf_path = base
+            pretrained_model_name_or_path = str(base.parent)
+            kwargs["gguf_file"] = base.name
         elif base.is_dir() and not (
             (base / "tokenizer.json").is_file()
             or (base / "tokenizer_config.json").is_file()
@@ -223,6 +229,19 @@ def _patch_gemma4_tokenizer() -> None:
             if ggufs:
                 gguf_path = ggufs[0]
                 kwargs["gguf_file"] = gguf_path.name
+                if len(ggufs) > 1:
+                    # Several unrelated models share this directory, so the
+                    # first by name is a guess. Callers that know the intended
+                    # file should pass it (or a ``gguf_file`` kwarg) instead;
+                    # guessing wrong yields a tokenizer from another model,
+                    # which corrupts output rather than failing loudly.
+                    logger.warning(
+                        "%d .gguf files in %s; building the tokenizer from "
+                        "%s. Point at the specific .gguf file to disambiguate.",
+                        len(ggufs),
+                        base,
+                        gguf_path.name,
+                    )
 
         gguf_bos: int | None = None
         gguf_eos: int | None = None

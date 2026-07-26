@@ -85,10 +85,23 @@ Two properties make this easy to get wrong:
   each layer then disagree.
 
 Re-indexing is a layout change and is safe on packed data when whole rows
-move. `out_proj` permutes within a row, so a head must span whole
-quantisation blocks; `_assert_head_block_aligned` refuses rather than
-splitting one (Q5_K packs 256 elements, so a 128-element head is half a
-block).
+move. `out_proj` is the exception: value heads index its *input* axis, so
+re-indexing moves bytes within each packed row, which is only valid when a
+head spans whole quantisation blocks.
+
+| `out_proj` type | block | 128-element head | handling |
+|---|---|---|---|
+| Q8_0 | 32 | 4 whole blocks | re-indexed in place, zero copy |
+| Q5_K / Q4_K / Q6_K | 256 | half a block | dequantised at load |
+
+`_qwen35_dequant_on_load` detects the misaligned case during
+`prepare_loading` and adds those tensors to `unquantized_modules`, so vLLM
+builds a plain `Linear`; `map_weights` then unpacks the payload, drops the
+now-unused `qweight_type` scalar, and re-indexes in element space. The cost
+is roughly 380 MB on a 4B model, paid only by models with grouped value
+heads and a 256-element-block `out_proj`. `_assert_head_block_aligned`
+remains as a backstop: a *packed* misaligned tensor reaching the transform
+raises rather than silently splitting a block.
 
 ## What the plugin must not do
 

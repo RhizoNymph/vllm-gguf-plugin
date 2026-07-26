@@ -327,6 +327,9 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[tuple[str, torch.Tensor]]:
         for hf_name, weight in weights:
+            hf_name, weight, skip = self._maybe_dequantize_on_load(hf_name, weight)
+            if skip:
+                continue
             weight = self.transform_weight(hf_name, weight)
             if weight.ndim == 3 and ".experts.0." in hf_name:
                 for expert_id, expert_weight in enumerate(weight.unbind()):
@@ -378,6 +381,37 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         if nk <= 0 or nv <= 0 or nv % nk:
             return None
         return nk, nv, hv, nk * hk
+
+    def _maybe_dequantize_on_load(
+        self,
+        hf_name: str,
+        weight: torch.Tensor,
+    ) -> tuple[str, torch.Tensor, bool]:
+        """Unpack tensors flagged by _qwen35_dequant_on_load.
+
+        Returns ``(name, weight, skip)``. The packed tensor arrives as
+        ``<x>.qweight`` alongside a ``<x>.qweight_type`` scalar; the layer is
+        now a plain Linear expecting ``<x>.weight``, so the scalar is dropped
+        and the payload is unpacked and renamed.
+        """
+        flagged = getattr(self, "_dequant_on_load", None)
+        if not flagged:
+            return hf_name, weight, False
+        for suffix, logical in ((".qweight_type", None), (".qweight", ".weight")):
+            if not hf_name.endswith(suffix):
+                continue
+            base = hf_name[: -len(suffix)] + ".weight"
+            if base not in flagged:
+                return hf_name, weight, False
+            if logical is None:
+                return hf_name, weight, True
+            from gguf.quants import dequantize
+
+            wtype = self._weight_type_map[base]
+            qtype = gguf.GGMLQuantizationType[wtype]
+            data = dequantize(weight.numpy(), qtype).astype("float32")
+            return base, torch.from_numpy(data), False
+        return hf_name, weight, False
 
     def _assert_head_block_aligned(self, hf_name: str, head_dim: int) -> None:
         """Fail loudly if a value head does not cover whole quant blocks.
@@ -469,8 +503,11 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             # so a head must cover a whole number of quantisation blocks.
             # Byte divisibility alone is not enough: Q5_K packs 256 elements
             # per block, so a 128-element head is half a block and reordering
-            # would split it.
-            self._assert_head_block_aligned(hf_name, hv)
+            # would split it. Such tensors arrive already dequantised (see
+            # _qwen35_dequant_on_load), where columns are plain elements and
+            # no alignment constraint applies.
+            if weight.dtype == torch.uint8:
+                self._assert_head_block_aligned(hf_name, hv)
             width = weight.shape[1]
             if width % nv:
                 raise RuntimeError(
@@ -567,12 +604,58 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         # _reorder_qwen35_value_heads); keyed by HF name with a ".weight"
         # suffix, before the iterator rewrites it to ".qweight".
         self._weight_type_map = weight_type_map
+        unquantized = self.get_unquantized_modules(weight_type_map)
+        # Tensors that must be dequantised on the way in because a value head
+        # does not cover whole quantisation blocks (see
+        # _qwen35_dequant_on_load). Declaring them unquantized makes vLLM
+        # build a plain Linear whose weight_loader takes float data.
+        self._dequant_on_load = self._qwen35_dequant_on_load(weight_type_map)
+        unquantized.extend(
+            name.removesuffix(".weight") for name in self._dequant_on_load
+        )
         self.load_spec = GGUFLoadSpec(
             weights_source=self._get_all_gguf_files(model_path),
             gguf_to_hf_name_map=gguf_to_hf_name_map,
-            unquantized_modules=self.get_unquantized_modules(weight_type_map),
+            unquantized_modules=unquantized,
         )
         return self.load_spec
+
+    def _qwen35_dequant_on_load(self, weight_type_map: dict[str, str]) -> set[str]:
+        """Qwen3.5 out_proj tensors that cannot be re-indexed while packed.
+
+        Value heads index out_proj's *input* axis, so re-indexing moves bytes
+        within each packed row. That is only valid when a head spans whole
+        quantisation blocks. Q5_K packs 256 elements per block, so a
+        128-element head is half a block and the permutation would split it.
+        Such tensors are dequantised at load instead — correctness over the
+        memory saving, and it only affects out_proj on models with grouped
+        value heads.
+        """
+        if self.config.model_type not in ("qwen3_5_text", "qwen3_5_moe_text"):
+            return set()
+        dims = self._qwen35_gdn_dims()
+        if dims is None:
+            return set()
+        _, _, hv, _ = dims
+        if dims[1] // dims[0] == 1:
+            return set()
+        out: set[str] = set()
+        for name, wtype in weight_type_map.items():
+            if not name.endswith(".linear_attn.out_proj.weight"):
+                continue
+            try:
+                block_size, _ = gguf.GGML_QUANT_SIZES[gguf.GGMLQuantizationType[wtype]]
+            except (KeyError, AttributeError):
+                continue
+            if block_size > 1 and hv % block_size:
+                out.add(name)
+        if out:
+            logger.info(
+                "Dequantising %d Qwen3.5 out_proj tensors on load: value heads "
+                "do not align with quantisation block boundaries.",
+                len(out),
+            )
+        return out
 
     def prepare_weights(
         self,

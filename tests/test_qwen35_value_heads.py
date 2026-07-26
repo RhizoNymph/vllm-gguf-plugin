@@ -93,7 +93,8 @@ def test_only_the_value_block_of_qkv_moves():
 
 def test_half_block_head_raises_rather_than_corrupting():
     """out_proj re-indexes inside a packed row, so a head that is half a
-    quantisation block cannot be moved without splitting the block."""
+    quantisation block cannot be moved without splitting the block. Packed
+    tensors that reach transform_weight unflagged must fail loudly."""
     nk, ratio, hv = 4, 3, 128
     nv = nk * ratio
     ad = _adapter(nk=nk, nv=nv, hv=hv)
@@ -102,6 +103,54 @@ def test_half_block_head_raises_rather_than_corrupting():
     src = torch.zeros((8, nv * 88), dtype=torch.uint8)
     with pytest.raises(RuntimeError, match="whole Q5_K blocks"):
         ad.transform_weight(name, src)
+
+
+def test_misaligned_out_proj_is_flagged_for_dequantisation():
+    nk, ratio, hv = 4, 3, 128
+    nv = nk * ratio
+    ad = _adapter(nk=nk, nv=nv, hv=hv)
+    name = "model.layers.0.linear_attn.out_proj.weight"
+    flagged = ad._qwen35_dequant_on_load({name: "Q5_K"})
+    assert flagged == {name}
+    # Q8_0 packs 32 elements, so a 128-element head is 4 whole blocks.
+    assert ad._qwen35_dequant_on_load({name: "Q8_0"}) == set()
+
+
+def test_ratio_one_never_needs_dequantisation():
+    """With 1:1 heads nothing is re-indexed, so nothing must be unpacked."""
+    ad = _adapter(nk=4, nv=4, hv=128)
+    name = "model.layers.0.linear_attn.out_proj.weight"
+    assert ad._qwen35_dequant_on_load({name: "Q5_K"}) == set()
+
+
+def test_dequantised_tensor_is_reindexed_without_alignment_error():
+    """Once unpacked, columns are plain elements and the block constraint
+    no longer applies."""
+    nk, ratio, hv = 4, 3, 2
+    nv = nk * ratio
+    ad = _adapter(nk=nk, nv=nv, hv=hv)
+    name = "model.layers.0.linear_attn.out_proj.weight"
+    ad._weight_type_map = {name: "Q5_K"}
+    src = torch.arange(2 * nv * hv, dtype=torch.float32).reshape(2, nv * hv)
+    out = ad.transform_weight(name, src)
+    assert out.shape == src.shape
+    assert not torch.equal(out, src)
+    # Column block for HF head 0 must come from ggml head 0 (r=0, g=0).
+    assert torch.equal(out[:, :hv], src[:, :hv])
+    # HF head 1 is (g=0, r=1), i.e. ggml index nk.
+    assert torch.equal(out[:, hv : 2 * hv], src[:, nk * hv : (nk + 1) * hv])
+
+
+def test_qweight_type_scalar_dropped_for_dequantised_tensor():
+    ad = _adapter(nk=4, nv=12, hv=128)
+    base = "model.layers.0.linear_attn.out_proj.weight"
+    ad._dequant_on_load = {base}
+    ad._weight_type_map = {base: "Q5_K"}
+    name, _, skip = ad._maybe_dequantize_on_load(
+        "model.layers.0.linear_attn.out_proj.qweight_type",
+        torch.tensor([13], dtype=torch.uint8),
+    )
+    assert skip is True
 
 
 def test_block_aligned_head_is_permitted():

@@ -2,13 +2,13 @@
 
 ## Scope
 
-Restoring the added-token vocabulary when a tokenizer is built from GGUF
-metadata: which vocab entries must be matched verbatim by `encode()` rather
-than passed through BPE.
+The added-token vocabulary of a tokenizer built from GGUF metadata: which
+entries `encode()` must match verbatim rather than pass through BPE, and
+which must not be in there at all.
 
 Not in scope: which `.gguf` backs the tokenizer (see
-[model_resolution](model_resolution.md)), BOS/EOS attribute repair, or the
-chat template itself.
+[model_resolution](model_resolution.md)), gemma4's BOS post-processor
+rebuild, or the chat template itself.
 
 ## The problem
 
@@ -123,19 +123,65 @@ every `encode()` consults.
 
 | File | Role |
 |---|---|
-| `vllm_gguf_plugin/tokenizer.py` | `added_tokens_from_gguf_vocab` (pure selection), `restore_gguf_added_tokens` (id-checked registration) |
-| `vllm_gguf_plugin/gemma4.py` | hosts the `AutoTokenizer.from_pretrained` wrapper; calls the restore for every arch, not just gemma4 |
-| `tests/test_gguf_added_tokens.py` | type selection, special-flag mapping, id-drift guard, failure tolerance |
+| `vllm_gguf_plugin/tokenizer.py` | `added_tokens_from_gguf_vocab` / `restore_gguf_added_tokens` (id-checked registration); `special_token_kwargs_from_vocab` / `gguf_special_token_kwargs` (bos/eos naming) |
+| `vllm_gguf_plugin/gemma4.py` | hosts the `AutoTokenizer.from_pretrained` wrapper; injects the bos/eos kwargs before construction and restores added tokens after, for every arch |
+| `tests/test_gguf_added_tokens.py` | type selection, special-flag mapping, id-drift guard, bos/eos naming, failure tolerance |
 
 The wrapper lives in `gemma4.py` for historical reasons — it is the only
 point where the plugin sees a tokenizer between construction and use. The
 BOS/EOS repair around it remains gemma4-only; the added-token restore is not.
 
-## Known gap
+## The `<s>`/`</s>` phantoms
 
-`GGUFQwen2Converter` also registers `<s>` and `</s>` as added tokens even
-when they are absent from the vocab, so they receive fresh ids at
-`vocab_size` and `vocab_size + 1` (248320/248321 on the 27B). Those ids index
-past the embedding matrix. Nothing emits them in practice — the GGUF's
-declared EOS is `<|im_end|>` — so this is recorded, not fixed. The restore
-above cannot introduce such a token, by the id-check invariant.
+A GGUF declares bos and eos as **ids** (`tokenizer.ggml.bos_token_id`), never
+as strings. The backend tokenizer class needs strings, so when none are
+supplied it falls back to its own defaults — `<s>` and `</s>`. Neither is in
+a Qwen vocab, and setting a special token that is absent *appends* it. They
+land at `vocab_size` and `vocab_size + 1`:
+
+```
+bos_token = '<s>'   id=248320     ← GGUF declares 248044 (<|endoftext|>)
+eos_token = '</s>'  id=248321     ← GGUF declares 248046 (<|im_end|>)
+```
+
+Both are past the last embedding row (248319). Nothing generates them, which
+is why this stayed hidden, but they are reachable from **input**: the literal
+text `<s>` in a prompt encodes to 248320, and the embedding lookup fails a
+device-side assert that kills the engine core.
+
+```
+POST /v1/completions  {"prompt": "hello <s> world"}
+  -> tokens [14556, 220, 248320, 1814]
+  -> RuntimeError: Triton Error [CUDA]: device-side assert triggered
+  -> EngineCore dead, CUDA context poisoned, 500 on every later request
+```
+
+`gguf_special_token_kwargs` resolves the declared ids to their vocab strings
+and passes them into `from_pretrained`, so the class defaults never apply.
+This is a *pre*-construction fix rather than a post-hoc repair, because the
+`tokenizers` backend offers no way to remove an added token once registered.
+It also corrects `bos_token_id`/`eos_token_id`, which otherwise point at the
+phantoms.
+
+Out-of-range declared ids are dropped rather than guessed — inventing a name
+for an id that has none would recreate the same bug. Caller-supplied
+`bos_token`/`eos_token` win, via `setdefault`.
+
+After the fix, on the 27B: `len(tokenizer) == vocab_size == 248320`, bos is
+`<|endoftext|>` (248044), eos is `<|im_end|>` (248046), and `hello <s> world`
+encodes to five in-vocab tokens and generates normally.
+
+## Downstream: reasoning parsers
+
+vLLM's `qwen3` reasoning parser matches on `<think>`/`</think>` and resolves
+them through `token_id_terminals`, so it needs each to be a single id. It
+therefore depends on the added-token restore above; without it the parser has
+nothing to match. With both in place:
+
+```
+--reasoning-parser qwen3
+```
+
+splits the response, putting the chain of thought in `message.reasoning` and
+leaving `message.content` as the answer alone. No plugin change is required —
+it is a serving flag, and the plugin does not set it.

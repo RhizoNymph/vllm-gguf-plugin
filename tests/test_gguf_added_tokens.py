@@ -1,17 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Re-registering the added tokens the transformers GGUF converters drop.
+"""The added-token vocabulary of a GGUF-derived tokenizer.
 
-A GGUF's ``tokenizer.ggml.token_type`` array marks which vocab entries are
-CONTROL (3) or USER_DEFINED (4) — the tokens HF stores in
-``added_tokens_decoder``. transformers' GGUF converters mostly ignore that
-array: ``GGUFQwen2Converter`` registers three hardcoded ChatML strings and
-nothing else. Tokens that miss out stay in the BPE vocab, so decoding works,
-but ``encode()`` BPE-splits them instead of emitting their atomic id.
+Two defects, opposite in sign. Tokens the converters **drop**: a GGUF's
+``tokenizer.ggml.token_type`` array marks entries CONTROL (3) or
+USER_DEFINED (4) — what HF stores in ``added_tokens_decoder`` — and
+``GGUFQwen2Converter`` ignores it, registering three hardcoded ChatML strings
+instead. The rest stay in the BPE vocab, so decoding works and only
+``encode()`` is wrong. For Qwen3.5/3.6 that silently breaks chat: the
+template prefills ``<think>``, the model receives ``<th|ink|>`` where one
+token belongs, and answers with an immediate end-of-turn — an empty response
+with no error.
 
-For Qwen3.5/3.6 that silently breaks chat: the chat template prefills
-``<think>``, the model receives ``<th|ink|>`` where one token belongs, and
-answers with an immediate end-of-turn — an empty response with no error.
+Tokens the converters **invent**: bos/eos come from the GGUF as ids only, so
+the backend supplies ``<s>``/``</s>`` from its class defaults and appends
+them past ``vocab_size``. A prompt containing ``<s>`` then indexes off the
+embedding matrix and kills the engine.
 """
 
 import pytest
@@ -20,7 +24,9 @@ from tokenizers import AddedToken
 
 from vllm_gguf_plugin.tokenizer import (
     added_tokens_from_gguf_vocab,
+    gguf_special_token_kwargs,
     restore_gguf_added_tokens,
+    special_token_kwargs_from_vocab,
 )
 
 
@@ -193,3 +199,64 @@ def test_restore_is_idempotent(monkeypatch):
     second = restore_gguf_added_tokens(tok, "model.gguf")
     assert first == second == 1
     assert [t.content for t in tok.added] == ["<think>", "<think>"]
+
+
+# --- bos/eos strings, so the backend's own defaults never mint a token ----
+#
+# A GGUF declares bos/eos as *ids*, never strings. TokenizersBackend fills
+# the missing strings from its class defaults, "<s>" and "</s>", and setting
+# a special token that is not in the vocab appends it — landing at
+# vocab_size and vocab_size + 1, past the last embedding row. Those ids are
+# reachable from ordinary text: a prompt containing "<s>" encodes to one and
+# takes down the engine with a device-side assert. Passing the real strings
+# up front means the defaults never apply.
+
+
+def test_bos_and_eos_ids_resolve_to_their_vocab_strings():
+    kwargs = special_token_kwargs_from_vocab(
+        ["a", "<|endoftext|>", "<|im_end|>"], bos_id=1, eos_id=2
+    )
+    assert kwargs == {"bos_token": "<|endoftext|>", "eos_token": "<|im_end|>"}
+
+
+def test_absent_ids_are_omitted_rather_than_guessed():
+    assert special_token_kwargs_from_vocab(["a"], bos_id=None, eos_id=None) == {}
+
+
+@pytest.mark.parametrize("bad_id", [-1, 5, 99])
+def test_out_of_range_ids_are_omitted(bad_id):
+    """A declared id past the vocab cannot name a string, and inventing one
+    would recreate exactly the bug this prevents."""
+    assert special_token_kwargs_from_vocab(["a", "b"], bos_id=bad_id, eos_id=None) == {}
+
+
+def test_only_the_declared_end_is_returned():
+    kwargs = special_token_kwargs_from_vocab(["a", "<|im_end|>"], bos_id=None, eos_id=1)
+    assert kwargs == {"eos_token": "<|im_end|>"}
+
+
+def test_special_token_kwargs_reads_the_gguf(monkeypatch):
+    monkeypatch.setattr(
+        "vllm_gguf_plugin.tokenizer._read_gguf_special_tokens",
+        lambda _: (["a", "<|endoftext|>", "<|im_end|>"], 1, 2),
+    )
+    assert gguf_special_token_kwargs("model.gguf") == {
+        "bos_token": "<|endoftext|>",
+        "eos_token": "<|im_end|>",
+    }
+
+
+def test_unreadable_gguf_yields_no_kwargs(monkeypatch, caplog):
+    def _boom(_):
+        raise OSError("truncated file")
+
+    monkeypatch.setattr("vllm_gguf_plugin.tokenizer._read_gguf_special_tokens", _boom)
+    with caplog.at_level("WARNING"):
+        assert gguf_special_token_kwargs("model.gguf") == {}
+
+
+def test_truncated_gguf_on_disk_yields_no_kwargs(tmp_path):
+    stub = tmp_path / "model.gguf"
+    stub.write_bytes(b"GGUF")
+
+    assert gguf_special_token_kwargs(stub) == {}

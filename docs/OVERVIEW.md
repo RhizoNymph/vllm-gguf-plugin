@@ -75,10 +75,14 @@ Features Index:
     doc: docs/features/hybrid_models.md
   tokenizer_added_tokens:
     description: >
-      Re-registering the CONTROL/USER_DEFINED tokens that transformers' GGUF
-      converters drop, so tokens like <think> encode to one id instead of
-      being BPE-split.
-    entry_points: [vllm_gguf_plugin.tokenizer.restore_gguf_added_tokens]
+      The added-token vocabulary of a GGUF-derived tokenizer: re-registering
+      the CONTROL/USER_DEFINED tokens the transformers converters drop, so
+      tokens like <think> encode to one id instead of being BPE-split, and
+      naming bos/eos from GGUF metadata so the backend's <s>/</s> defaults
+      never mint an id past the embedding matrix.
+    entry_points:
+      - vllm_gguf_plugin.tokenizer.restore_gguf_added_tokens
+      - vllm_gguf_plugin.tokenizer.gguf_special_token_kwargs
     depends_on: [model_resolution]
     doc: docs/features/tokenizer_added_tokens.md
 ```
@@ -93,5 +97,6 @@ Features Index:
   `mamba_block_size`). Those belong to vLLM, which computes them from the model
   once the architecture is described correctly.
 - Repairing a synthesised tokenizer never changes its vocabulary. Added tokens
-  are only re-registered at ids the tokenizer already resolves them to, so no
-  token can be minted past `vocab_size` and index off the embedding matrix.
+  are only re-registered at ids the tokenizer already resolves them to, and
+  bos/eos are named from GGUF metadata before construction, so no token can be
+  minted past `vocab_size` and index off the embedding matrix.

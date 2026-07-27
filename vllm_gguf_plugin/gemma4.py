@@ -16,7 +16,10 @@ from pathlib import Path
 import gguf
 from vllm.logger import init_logger
 
-from vllm_gguf_plugin.tokenizer import restore_gguf_added_tokens
+from vllm_gguf_plugin.tokenizer import (
+    gguf_special_token_kwargs,
+    restore_gguf_added_tokens,
+)
 
 logger = init_logger(__name__)
 
@@ -186,9 +189,11 @@ def _patch_gemma4_tokenizer() -> None:
     reports (HF's converter sometimes leaves this at the wrong vocab id — e.g.
     203 instead of 2).
 
-    All architectures: re-register the CONTROL/USER_DEFINED tokens the
-    converters drop from the added-token vocabulary. See
-    ``vllm_gguf_plugin.tokenizer`` and docs/features/tokenizer_added_tokens.md.
+    All architectures: name bos/eos from the GGUF before construction so the
+    backend's ``<s>``/``</s>`` defaults never mint an out-of-range token, and
+    re-register the CONTROL/USER_DEFINED tokens the converters drop from the
+    added-token vocabulary. See ``vllm_gguf_plugin.tokenizer`` and
+    docs/features/tokenizer_added_tokens.md.
     """
     global _TOKENIZER_PATCHED
     if _TOKENIZER_PATCHED:
@@ -278,6 +283,14 @@ def _patch_gemma4_tokenizer() -> None:
 
         if is_gemma4 and "add_bos_token" not in kwargs:
             kwargs["add_bos_token"] = True
+
+        if gguf_path is not None:
+            # Name bos/eos before construction. Left unset, the backend
+            # tokenizer falls back to "<s>"/"</s>", which are absent from
+            # these vocabs and get appended past the embedding matrix.
+            # Caller-supplied values win.
+            for key, value in gguf_special_token_kwargs(gguf_path).items():
+                kwargs.setdefault(key, value)
 
         tokenizer = _orig_from_pretrained(
             pretrained_model_name_or_path, *args, **kwargs

@@ -16,6 +16,11 @@ from pathlib import Path
 import gguf
 from vllm.logger import init_logger
 
+from vllm_gguf_plugin.tokenizer import (
+    gguf_special_token_kwargs,
+    restore_gguf_added_tokens,
+)
+
 logger = init_logger(__name__)
 
 _CONFIG_PATCHED = False
@@ -169,17 +174,26 @@ def _patch_gemma4_config() -> None:
 
 
 def _patch_gemma4_tokenizer() -> None:
-    """Fix BOS handling for gemma4 GGUF tokenizers.
+    """Wrap ``AutoTokenizer.from_pretrained`` to repair GGUF tokenizers.
 
-    The transformers GGUF tokenizer converter doesn't propagate
-    ``tokenizer.ggml.add_bos_token`` from the GGUF metadata, so the resulting
-    fast tokenizer has ``add_bos_token=False`` even when the underlying model
-    requires a BOS prefix. For Gemma4 (trained with a leading <bos>) that
-    produces degenerate output — the model collapses to repeating the last two
-    prompt tokens. Patch ``AutoTokenizer.from_pretrained`` to inject
-    ``add_bos_token=True`` when loading a gemma4 GGUF, and post-fix
-    ``bos_token_id`` to whatever the GGUF metadata reports (HF's converter
-    sometimes leaves this at the wrong vocab id — e.g. 203 instead of 2).
+    Two fixes ride on this one hook, because it is the only point where the
+    plugin sees the tokenizer between construction and use.
+
+    Gemma4-specific: the transformers GGUF tokenizer converter doesn't
+    propagate ``tokenizer.ggml.add_bos_token`` from the GGUF metadata, so the
+    resulting fast tokenizer has ``add_bos_token=False`` even when the
+    underlying model requires a BOS prefix. For Gemma4 (trained with a leading
+    <bos>) that produces degenerate output — the model collapses to repeating
+    the last two prompt tokens. Inject ``add_bos_token=True`` when loading a
+    gemma4 GGUF, and post-fix ``bos_token_id`` to whatever the GGUF metadata
+    reports (HF's converter sometimes leaves this at the wrong vocab id — e.g.
+    203 instead of 2).
+
+    All architectures: name bos/eos from the GGUF before construction so the
+    backend's ``<s>``/``</s>`` defaults never mint an out-of-range token, and
+    re-register the CONTROL/USER_DEFINED tokens the converters drop from the
+    added-token vocabulary. See ``vllm_gguf_plugin.tokenizer`` and
+    docs/features/tokenizer_added_tokens.md.
     """
     global _TOKENIZER_PATCHED
     if _TOKENIZER_PATCHED:
@@ -270,9 +284,22 @@ def _patch_gemma4_tokenizer() -> None:
         if is_gemma4 and "add_bos_token" not in kwargs:
             kwargs["add_bos_token"] = True
 
+        if gguf_path is not None:
+            # Name bos/eos before construction. Left unset, the backend
+            # tokenizer falls back to "<s>"/"</s>", which are absent from
+            # these vocabs and get appended past the embedding matrix.
+            # Caller-supplied values win.
+            for key, value in gguf_special_token_kwargs(gguf_path).items():
+                kwargs.setdefault(key, value)
+
         tokenizer = _orig_from_pretrained(
             pretrained_model_name_or_path, *args, **kwargs
         )
+
+        if gguf_path is not None:
+            # Every GGUF arch the plugin serves loses added tokens in
+            # conversion, so this is not gated on is_gemma4.
+            restore_gguf_added_tokens(tokenizer, gguf_path)
 
         if is_gemma4 and gguf_bos is not None:
             try:

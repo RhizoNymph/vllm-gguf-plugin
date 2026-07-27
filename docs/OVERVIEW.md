@@ -34,6 +34,13 @@ Overview:
       translate GGUF metadata keys into an HF config dict, mapping the ggml
       architecture name onto a vLLM architecture and filling fields that ggml
       stores implicitly.
+    tokenizer_synthesis: >
+      A patched AutoTokenizer.from_pretrained (in gemma4.py) restates the
+      GGUF reference in the (dir, gguf_file) form transformers needs, then
+      repairs what its converters get wrong: BOS/EOS ids for gemma4, and —
+      for every architecture — the CONTROL/USER_DEFINED tokens they drop
+      from the added-token vocabulary. See docs/features/
+      tokenizer_added_tokens.md.
     weight_loading: >
       GGUFModelLoader plus weights_adapter/* map ggml tensor names onto vLLM
       parameter names, handling per-architecture fusions (qkv, gate_up) and
@@ -66,6 +73,18 @@ Features Index:
     entry_points: [vllm_gguf_plugin.qwen35.register_qwen35_gguf_support]
     depends_on: [model_resolution]
     doc: docs/features/hybrid_models.md
+  tokenizer_added_tokens:
+    description: >
+      The added-token vocabulary of a GGUF-derived tokenizer: re-registering
+      the CONTROL/USER_DEFINED tokens the transformers converters drop, so
+      tokens like <think> encode to one id instead of being BPE-split, and
+      naming bos/eos from GGUF metadata so the backend's <s>/</s> defaults
+      never mint an id past the embedding matrix.
+    entry_points:
+      - vllm_gguf_plugin.tokenizer.restore_gguf_added_tokens
+      - vllm_gguf_plugin.tokenizer.gguf_special_token_kwargs
+    depends_on: [model_resolution]
+    doc: docs/features/tokenizer_added_tokens.md
 ```
 
 ## Invariants
@@ -77,3 +96,7 @@ Features Index:
 - The plugin does not set cache-geometry knobs (`block_size`,
   `mamba_block_size`). Those belong to vLLM, which computes them from the model
   once the architecture is described correctly.
+- Repairing a synthesised tokenizer never changes its vocabulary. Added tokens
+  are only re-registered at ids the tokenizer already resolves them to, and
+  bos/eos are named from GGUF metadata before construction, so no token can be
+  minted past `vocab_size` and index off the embedding matrix.

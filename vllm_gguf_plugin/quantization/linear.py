@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import gguf
 import torch
 from gguf import GGMLQuantizationType as WeightType
@@ -31,6 +33,51 @@ from .utils import (
 )
 
 
+# Batch size at or above which the fused MMQ kernel loses to
+# dequantize-then-cuBLAS, so prefill-shaped GEMMs take the dequant path instead.
+#
+# `mul_mat_q4_K` computes a 32x4 output tile -- one output per thread over the
+# full K loop -- so operand-fetch instructions vastly outnumber math. Nsight
+# Compute on an RTX 3090 (M=684, 5120x17408 Q4_K) shows Mem Pipes Busy at 95.44%
+# while DRAM sits at 46.63% and the tensor pipes are completely idle, giving
+# ~5.7 TFLOP/s *flat* from M=32 to M=8192 -- 8% of the card's fp16 peak, and
+# batch-independent, so larger batches cannot help.
+#
+# Materializing bf16 weights and calling cuBLAS reaches ~55 TFLOP/s (77% of peak,
+# via a 256x128 tensor-core tile): 9.5x for Q4_K, 12.4x Q5_K, 12.7x Q6_K at
+# M=2048, and still ~8.9x ahead even paying a full dequantization on every call.
+# Crossover is near M=32. Accuracy also improves 6-8x, because MMQ additionally
+# quantizes activations to int8 (`quantize_q8_1`) whereas this path keeps bf16.
+#
+# Measured end to end on Qwen3.6-27B-UD-Q4_K_XL (RTX 3090, torch.compile +
+# CUDA graphs): prefill 105.8 -> 692.3 tok/s (6.54x), mean TTFT 43.9 -> 6.7 s,
+# for 7.6% less KV cache (peak activation grows by the transient bf16 weight,
+# ~0.29 GiB here). Decode is untouched: decode batches are <= max_num_seqs, far
+# below this threshold, so they still take the MMVQ/MMQ path.
+#
+# Set VLLM_GGUF_MMQ_SAFE=0 to disable and always use MMQ.
+_MMQ_SAFE = int(os.environ.get("VLLM_GGUF_MMQ_SAFE", "32"))
+
+
+def _dequant_gemm(
+    x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
+) -> torch.Tensor:
+    """Dequantize `qweight` to `x.dtype`, then a plain (tensor-core) GEMM."""
+    block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
+    shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
+    weight = ops.ggml_dequantize(qweight, qweight_type, *shape, x.dtype)
+    return x @ weight.T
+
+
+def _prefer_dequant_gemm(x: torch.Tensor, qweight_type: int) -> bool:
+    """True when this GEMM is large enough that MMQ is the slower choice."""
+    return (
+        _MMQ_SAFE > 0
+        and x.shape[0] >= _MMQ_SAFE
+        and qweight_type in DEQUANT_TYPES
+    )
+
+
 def _fused_mul_mat_gguf(
     x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
 ) -> torch.Tensor:
@@ -44,13 +91,12 @@ def _fused_mul_mat_gguf(
         return x @ qweight.T
     if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
+    elif _prefer_dequant_gemm(x, qweight_type):
+        y = _dequant_gemm(x, qweight, qweight_type)
     elif qweight_type in MMQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
     elif qweight_type in DEQUANT_TYPES:
-        block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
-        shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
-        weight = ops.ggml_dequantize(qweight, qweight_type, *shape, x.dtype)
-        y = x @ weight.T
+        y = _dequant_gemm(x, qweight, qweight_type)
     else:
         qweight_type = WeightType(qweight_type)
         raise NotImplementedError(f"Unsupported GGUF quantization type: {qweight_type}")

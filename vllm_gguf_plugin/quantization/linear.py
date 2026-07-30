@@ -55,8 +55,10 @@ from .utils import (
 # ~0.29 GiB here). Decode is untouched: decode batches are <= max_num_seqs, far
 # below this threshold, so they still take the MMVQ/MMQ path.
 #
-# Set VLLM_GGUF_MMQ_SAFE=0 to disable and always use MMQ.
-_MMQ_SAFE = int(os.environ.get("VLLM_GGUF_MMQ_SAFE", "32"))
+# Opt-in for now: the numbers above come from a single model on a single GPU
+# (RTX 3090, sm_86), so the default stays 0 (always MMQ, unchanged behaviour)
+# until validated more widely. Set VLLM_GGUF_MMQ_SAFE=32 to enable.
+_MMQ_SAFE = int(os.environ.get("VLLM_GGUF_MMQ_SAFE", "0"))
 
 
 def _dequant_gemm(

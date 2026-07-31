@@ -48,7 +48,9 @@ Overview:
     quantization: >
       quantization/* implements the GGUF quantization backend (linear, MoE,
       embeddings) over ggml block layouts; triton/ and csrc/ hold the
-      dequantisation kernels.
+      dequantisation and quantized-GEMM kernels. csrc/gguf/llamacpp/ vendors
+      llama.cpp's tensor-core MMQ for prefill — see
+      docs/features/mma_mmq_kernel.md.
   data_flow: >
     EngineArgs.create_model_config (patched) resolves the GGUF reference,
     forces quantization/load_format/config_format to "gguf", rewrites `model`
@@ -85,6 +87,15 @@ Features Index:
       - vllm_gguf_plugin.tokenizer.gguf_special_token_kwargs
     depends_on: [model_resolution]
     doc: docs/features/tokenizer_added_tokens.md
+  mma_mmq_kernel:
+    description: >
+      Routing quantized prefill GEMMs at llama.cpp's tensor-core (MMA) MMQ
+      kernels instead of the plugin's DP4A-era copy, whose 4-token-deep output
+      tile pins prefill at ~8% of peak. Opt-in via VLLM_GGUF_MMA_MMQ; decode,
+      MoE and dequantization are untouched.
+    entry_points: [gguf_mma::supported, gguf_mma::launch, ggml_mul_mat_a8]
+    depends_on: []
+    doc: docs/features/mma_mmq_kernel.md
 ```
 
 ## Invariants

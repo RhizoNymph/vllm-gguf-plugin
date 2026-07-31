@@ -16,6 +16,9 @@
 #include "mmq.cuh"
 #include "moe.cuh"
 #include "moe_vec.cuh"
+#include "mmq_mma.h"
+
+#include <cstdlib>
 
 using torch::headeronly::ScalarType;
 using torch::stable::Tensor;
@@ -217,6 +220,17 @@ Tensor ggml_mul_mat_vec_a8(Tensor W,  // quant weight
   return Y;
 }
 
+// Opt-in routing to the vendored llama.cpp MMA (tensor-core) MMQ kernels.
+// Off by default: the legacy DP4A kernels below are what every existing
+// deployment runs, and the MMA path currently needs fp32 staging buffers.
+static bool mma_mmq_enabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("VLLM_GGUF_MMA_MMQ");
+    return v != nullptr && v[0] != '\0' && v[0] != '0';
+  }();
+  return enabled;
+}
+
 Tensor ggml_mul_mat_a8(Tensor W,  // quant weight
                        Tensor X,  // input
                        int64_t type, int64_t row) {
@@ -227,6 +241,41 @@ Tensor ggml_mul_mat_a8(Tensor W,  // quant weight
   const DeviceGuard device_guard(device_idx);
   Tensor Y = torch::stable::new_zeros(W, {batch, row}, X.scalar_type());
   cudaStream_t stream = get_current_cuda_stream(device_idx);
+
+  if (mma_mmq_enabled() &&
+      gguf_mma::supported(static_cast<int>(type), device_idx)) {
+    // The vendored kernels are fp32 in / fp32 out, so activations and results
+    // stage through float buffers. That is the current cost of this path;
+    // templating upstream's quantize and write-back on the element type would
+    // remove both.
+    gguf_mma::DType dt;
+    switch (X.scalar_type()) {
+      case ScalarType::Half:
+        dt = gguf_mma::DType::F16;
+        break;
+      case ScalarType::BFloat16:
+        dt = gguf_mma::DType::BF16;
+        break;
+      default:
+        dt = gguf_mma::DType::F32;
+        break;
+    }
+    Tensor x_f32 = torch::stable::new_empty(W, {batch, col}, ScalarType::Float);
+    Tensor y_f32 = torch::stable::new_empty(W, {batch, row}, ScalarType::Float);
+    const int64_t q8_bytes = static_cast<int64_t>(
+        gguf_mma::quantized_activation_bytes(batch, col, device_idx));
+    Tensor q8 = torch::stable::new_empty(W, {q8_bytes}, ScalarType::Byte);
+
+    gguf_mma::to_f32(X.data_ptr(), dt, (float*)x_f32.data_ptr(), batch * col,
+                     stream);
+    gguf_mma::launch(W.data_ptr(), static_cast<int>(type),
+                     (const float*)x_f32.data_ptr(), (float*)y_f32.data_ptr(),
+                     q8.data_ptr(), batch, row, col, stream);
+    gguf_mma::from_f32((const float*)y_f32.data_ptr(), Y.data_ptr(), dt,
+                       batch * row, stream);
+    return Y;
+  }
+
   Tensor quant_X =
       torch::stable::new_empty(W, {batch, padded / 32 * 9}, ScalarType::Int);
   VLLM_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_mul_mat_a8", [&] {

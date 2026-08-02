@@ -67,6 +67,7 @@ if _should_build_extension():
                     # and redefine the same block structs, so they must never
                     # meet in one TU.
                     "vllm_gguf_plugin/csrc/gguf/mmq_mma.cu",
+                    "vllm_gguf_plugin/csrc/gguf/mmq_mma_quantize.cu",
                     "vllm_gguf_plugin/csrc/gguf/mmq_mma_shim.cu",
                     "vllm_gguf_plugin/csrc/gguf/llamacpp/quantize.cu",
                 ]

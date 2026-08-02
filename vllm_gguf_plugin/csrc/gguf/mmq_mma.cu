@@ -31,15 +31,6 @@ constexpr ggml_type kSupported[] = {
     GGML_TYPE_Q5_K, GGML_TYPE_Q6_K,
 };
 
-template <typename src_t>
-__global__ void convert_to_f32(const src_t * __restrict__ src,
-                               float * __restrict__ dst, int64_t n) {
-    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        dst[i] = (float) src[i];
-    }
-}
-
 template <typename dst_t>
 __global__ void convert_from_f32(const float * __restrict__ src,
                                  dst_t * __restrict__ dst, int64_t n) {
@@ -100,16 +91,15 @@ size_t quantized_activation_bytes(int64_t M, int64_t K, int device) {
            (size_t) get_mmq_x_max_host(cc) * sizeof(block_q8_1_mmq);
 }
 
-void launch(const void * w, int ggml_type_id, const float * x_f32, float * y_f32,
-            void * q8, int64_t M, int64_t N, int64_t K, cudaStream_t stream) {
+void launch(const void * w, int ggml_type_id, const void * x, DType dtype,
+            float * y_f32, void * q8, int64_t M, int64_t N, int64_t K,
+            cudaStream_t stream) {
     const ggml_type type = (ggml_type) ggml_type_id;
     const int64_t k_padded = GGML_PAD(K, MATRIX_ROW_PADDING);
 
-    quantize_mmq_q8_1_cuda(x_f32, /*ids=*/nullptr, q8, type,
-                           /*ne00=*/K, /*s01=*/K, /*s02=*/M * K, /*s03=*/M * K,
-                           /*ne0=*/k_padded, /*ne1=*/M, /*ne2=*/1, /*ne3=*/1,
-                           stream);
-    CUDA_CHECK(cudaGetLastError());
+    // Reads bf16/fp16 activations directly (mmq_mma_quantize.cu) rather than
+    // going through an M*K fp32 staging buffer.
+    quantize_activations(x, dtype, q8, ggml_type_id, M, K, stream);
 
     // Rows of the weight are ggml blocks, so the row stride is in blocks.
     const int64_t stride_row_x = K / ggml_blck_size(type);
@@ -142,26 +132,6 @@ void launch(const void * w, int ggml_type_id, const float * x_f32, float * y_f32
     static ggml_backend_cuda_context * const ctx =
         new ggml_backend_cuda_context(ggml_cuda_get_device());
     dispatch_type(*ctx, args, stream);
-    CUDA_CHECK(cudaGetLastError());
-}
-
-void to_f32(const void * src, DType src_dtype, float * dst, int64_t n,
-            cudaStream_t stream) {
-    constexpr int block = 256;
-    switch (src_dtype) {
-        case DType::F32:
-            CUDA_CHECK(cudaMemcpyAsync(dst, src, n * sizeof(float),
-                                       cudaMemcpyDeviceToDevice, stream));
-            break;
-        case DType::F16:
-            convert_to_f32<<<grid_for(n, block), block, 0, stream>>>(
-                (const __half *) src, dst, n);
-            break;
-        case DType::BF16:
-            convert_to_f32<<<grid_for(n, block), block, 0, stream>>>(
-                (const __nv_bfloat16 *) src, dst, n);
-            break;
-    }
     CUDA_CHECK(cudaGetLastError());
 }
 

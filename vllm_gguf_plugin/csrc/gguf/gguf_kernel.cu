@@ -260,17 +260,14 @@ Tensor ggml_mul_mat_a8(Tensor W,  // quant weight
         dt = gguf_mma::DType::F32;
         break;
     }
-    Tensor x_f32 = torch::stable::new_empty(W, {batch, col}, ScalarType::Float);
     Tensor y_f32 = torch::stable::new_empty(W, {batch, row}, ScalarType::Float);
     const int64_t q8_bytes = static_cast<int64_t>(
         gguf_mma::quantized_activation_bytes(batch, col, device_idx));
     Tensor q8 = torch::stable::new_empty(W, {q8_bytes}, ScalarType::Byte);
 
-    gguf_mma::to_f32(X.data_ptr(), dt, (float*)x_f32.data_ptr(), batch * col,
+    gguf_mma::launch(W.data_ptr(), static_cast<int>(type), X.data_ptr(), dt,
+                     (float*)y_f32.data_ptr(), q8.data_ptr(), batch, row, col,
                      stream);
-    gguf_mma::launch(W.data_ptr(), static_cast<int>(type),
-                     (const float*)x_f32.data_ptr(), (float*)y_f32.data_ptr(),
-                     q8.data_ptr(), batch, row, col, stream);
     gguf_mma::from_f32((const float*)y_f32.data_ptr(), Y.data_ptr(), dt,
                        batch * row, stream);
     return Y;

@@ -79,29 +79,36 @@ Two properties make this easy to get wrong:
   the two orderings are identical, so a 0.8B model loads and generates
   fluently while every larger sibling is silently scrambled.
 - **Quantised tensors arrive renamed.** The weight iterator rewrites
-  `<x>.weight` to `<x>.qweight`. Matching only `.weight` skips exactly the
-  projections — and leaving the projections un-reordered while the recurrent
-  state *is* reordered is worse than doing nothing, because the two halves of
-  each layer then disagree.
+  `<x>.weight` to `<x>.qweight`, so any name match has to account for both
+  spellings. Leaving a projection un-reordered while the recurrent state *is*
+  reordered is worse than doing nothing, because the two halves of each layer
+  then disagree. `out_proj` is the one deliberate exception below: it is left
+  in ggml order and reconciled on the activation side instead.
 
 Re-indexing is a layout change and is safe on packed data when whole rows
 move. `out_proj` is the exception: value heads index its *input* axis, so
-re-indexing moves bytes within each packed row, which is only valid when a
-head spans whole quantisation blocks.
+re-indexing the weight would move bytes *within* each packed row, which is
+only valid when a head spans whole quantisation blocks — and it often does
+not (Q5_K packs 256 elements, so a 128-element head is half a block).
+
+`out_proj` therefore does not re-index its weight at all. Instead
+`Qwen35GGUFAdapter.get_linear_layouts` registers a `GGUFHeadTilingLayout`
+(`quantization/layout.py`) on the layer, the weight stays in ggml order, and
+`GGUFLinearMethod.apply` permutes the *activations* with
+`layout.input_to_gguf(x)` before the matmul. Permuting the input is a pure
+element-space operation, so the packed weight is never touched and no
+dequantisation is needed:
 
 | `out_proj` type | block | 128-element head | handling |
 |---|---|---|---|
-| Q8_0 | 32 | 4 whole blocks | re-indexed in place, zero copy |
-| Q5_K / Q4_K / Q6_K | 256 | half a block | dequantised at load |
+| any quantised type | any | any | weight left packed; activations permuted |
+| F32 / F16 / BF16 | — | — | weight re-indexed directly (`weight_to_vllm`) |
 
-`_qwen35_dequant_on_load` detects the misaligned case during
-`prepare_loading` and adds those tensors to `unquantized_modules`, so vLLM
-builds a plain `Linear`; `map_weights` then unpacks the payload, drops the
-now-unused `qweight_type` scalar, and re-indexes in element space. The cost
-is roughly 380 MB on a 4B model, paid only by models with grouped value
-heads and a 256-element-block `out_proj`. `_assert_head_block_aligned`
-remains as a backstop: a *packed* misaligned tensor reaching the transform
-raises rather than silently splitting a block.
+`_restore_gdn_weight` distinguishes the two by name: quantised tensors arrive
+as `<x>.qweight`, so the `out_proj` branch — which requires `.weight` — does
+not fire for them. The layout also carries `shard_weight`, which selects a
+rank's groups out of each stored tile so tensor parallelism keeps working on
+packed data.
 
 ## What the plugin must not do
 

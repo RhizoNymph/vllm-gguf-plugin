@@ -5,12 +5,22 @@
 ggml strides value heads as ``r * num_k_heads + g``; HF groups them under
 their key head as ``g * ratio + r``. The orderings coincide only when
 num_v_heads == num_k_heads, so a 1:1 model cannot detect a mistake here.
+
+Unquantized tensors are re-indexed on load. Quantized weights are left in
+ggml order and the *activations* are permuted to match at matmul time, via
+the layout registered on the linear layer -- that avoids permuting bytes
+inside a packed row, which would split a quantisation block whenever a head
+is not a whole number of blocks (Q5_K packs 256 elements, so a 128-element
+head is half a block).
 """
 
-import pytest
 import torch
 
-from vllm_gguf_plugin.weights_adapter.default import GGUFWeightsAdapter
+from vllm_gguf_plugin.quantization.layout import GGUFHeadTilingLayout
+from vllm_gguf_plugin.weights_adapter.qwen3_5 import (
+    Qwen35GGUFAdapter,
+    _gdn_value_head_layout,
+)
 
 
 class _Cfg:
@@ -28,8 +38,9 @@ class _Cfg:
         return self
 
 
-def _adapter(**kw):
-    return GGUFWeightsAdapter(_Cfg(**kw))
+class _ModelConfig:
+    def __init__(self, cfg):
+        self.hf_config = cfg
 
 
 def _ggml_head_order(nk, ratio):
@@ -37,127 +48,107 @@ def _ggml_head_order(nk, ratio):
     return [r * nk + g for g in range(nk) for r in range(ratio)]
 
 
+def _restore(cfg, name, weight):
+    layout = _gdn_value_head_layout(cfg)
+    return Qwen35GGUFAdapter()._restore_gdn_weight(name, weight, cfg, layout)
+
+
 def test_value_heads_regrouped_under_key_head():
     nk, ratio = 4, 3
     nv = nk * ratio
-    ad = _adapter(nk=nk, nv=nv, hv=1)
+    cfg = _Cfg(nk=nk, nv=nv, hv=1)
     # One row per value head, tagged with its ggml index.
     src = torch.arange(nv, dtype=torch.float32).reshape(nv, 1)
-    out = ad.transform_weight("model.layers.0.linear_attn.in_proj_b.weight", src)
+    out = _restore(cfg, "model.layers.0.linear_attn.in_proj_b.weight", src)
     assert out.flatten().tolist() == [float(i) for i in _ggml_head_order(nk, ratio)]
 
 
-def test_ratio_one_is_a_noop():
+def test_ratio_one_registers_no_layout():
     """A 1:1 model must be left untouched - the orderings are identical."""
-    ad = _adapter(nk=4, nv=4, hv=1)
-    src = torch.arange(4, dtype=torch.float32).reshape(4, 1)
-    out = ad.transform_weight("model.layers.0.linear_attn.in_proj_b.weight", src)
-    assert out.flatten().tolist() == [0.0, 1.0, 2.0, 3.0]
+    assert _gdn_value_head_layout(_Cfg(nk=4, nv=4, hv=1)) is None
 
 
-def test_quantised_tensors_are_reordered_despite_rename():
-    """The weight iterator renames ``.weight`` to ``.qweight`` for quantised
-    tensors. Matching only ``.weight`` silently skips exactly the projections
-    that carry most of the model."""
-    nk, ratio = 4, 3
-    nv = nk * ratio
-    ad = _adapter(nk=nk, nv=nv, hv=1)
-    src = torch.arange(nv, dtype=torch.uint8).reshape(nv, 1)
-    out = ad.transform_weight("model.layers.0.linear_attn.in_proj_z.qweight", src)
-    assert out.flatten().tolist() == _ggml_head_order(nk, ratio)
+def test_ratio_one_declares_no_linear_layouts():
+    cfg = _Cfg(nk=4, nv=4, hv=1)
+    name_map = {"blk.0.ssm_out.weight": "model.layers.0.linear_attn.out_proj.weight"}
+    layouts = Qwen35GGUFAdapter().get_linear_layouts(
+        None, _ModelConfig(cfg), name_map
+    )
+    assert layouts == {}
+
+
+def test_out_proj_gets_a_layout_so_activations_are_reordered():
+    """Grouped value heads index out_proj's *input* axis. The weight may be
+    packed, so the reordering has to happen on the activations instead."""
+    nk, ratio, hv = 4, 3, 128
+    cfg = _Cfg(nk=nk, nv=nk * ratio, hv=hv)
+    name_map = {"blk.0.ssm_out.weight": "model.layers.0.linear_attn.out_proj.weight"}
+    layouts = Qwen35GGUFAdapter().get_linear_layouts(
+        None, _ModelConfig(cfg), name_map
+    )
+    assert layouts == {
+        "model.layers.0.linear_attn.out_proj": GGUFHeadTilingLayout(
+            heads_per_group=ratio, head_dim=hv
+        )
+    }
+
+
+def test_packed_out_proj_is_left_in_ggml_order():
+    """Quantised tensors arrive renamed to ``.qweight``. Permuting bytes
+    inside a packed row could split a quantisation block, so the weight must
+    be handed through untouched - the layout fixes up the input instead."""
+    nk, ratio, hv = 4, 3, 128
+    cfg = _Cfg(nk=nk, nv=nk * ratio, hv=hv)
+    src = torch.zeros((8, nk * ratio * 88), dtype=torch.uint8)
+    assert _restore(cfg, "model.layers.0.linear_attn.out_proj.qweight", src) is None
 
 
 def test_qweight_type_scalars_are_left_alone():
-    ad = _adapter(nk=4, nv=12, hv=1)
+    cfg = _Cfg(nk=4, nv=12, hv=1)
     src = torch.tensor([13], dtype=torch.uint8)
-    out = ad.transform_weight(
-        "model.layers.0.linear_attn.in_proj_z.qweight_type", src
-    )
-    assert torch.equal(out, src)
+    out = _restore(cfg, "model.layers.0.linear_attn.in_proj_z.qweight_type", src)
+    assert out is None
+
+
+def test_activation_reorder_matches_weight_reorder():
+    """The load-bearing invariant of the packed path: permuting the input
+    against a ggml-ordered weight must equal leaving the input alone and
+    re-indexing the weight. If these disagree, quantised and unquantised
+    models silently produce different results."""
+    nk, ratio, hv = 4, 3, 2
+    nv = nk * ratio
+    layout = GGUFHeadTilingLayout(heads_per_group=ratio, head_dim=hv)
+
+    x_hf = torch.randn(5, nv * hv)
+    w_ggml = torch.randn(7, nv * hv)
+    w_hf = layout.weight_to_vllm(w_ggml, dim=1)
+
+    torch.testing.assert_close(x_hf @ w_hf.T, layout.input_to_gguf(x_hf) @ w_ggml.T)
 
 
 def test_only_the_value_block_of_qkv_moves():
     """q and k are indexed by key heads and must stay in place."""
     nk, ratio, hk, hv = 4, 3, 2, 2
     nv = nk * ratio
-    ad = _adapter(nk=nk, nv=nv, hv=hv, hk=hk)
-    key_dim = nk * hk
-    qk = torch.full((2 * key_dim, 1), -1.0)
+    cfg = _Cfg(nk=nk, nv=nv, hv=hv, hk=hk)
+    qk_rows = 2 * nk * hk
+    qk = torch.full((qk_rows, 1), -1.0)
     v = torch.arange(nv * hv, dtype=torch.float32).reshape(nv * hv, 1)
-    out = ad.transform_weight(
-        "model.layers.0.linear_attn.in_proj_qkv.weight", torch.cat([qk, v])
+    out = _restore(
+        cfg, "model.layers.0.linear_attn.in_proj_qkv.weight", torch.cat([qk, v])
     )
-    assert torch.equal(out[: 2 * key_dim], qk)
-    assert not torch.equal(out[2 * key_dim :], v)
+    assert torch.equal(out[:qk_rows], qk)
+    assert not torch.equal(out[qk_rows:], v)
 
 
-def test_half_block_head_raises_rather_than_corrupting():
-    """out_proj re-indexes inside a packed row, so a head that is half a
-    quantisation block cannot be moved without splitting the block. Packed
-    tensors that reach transform_weight unflagged must fail loudly."""
-    nk, ratio, hv = 4, 3, 128
+def test_a_log_is_unexponentiated_and_reindexed():
+    """ggml stores the decay already exponentiated as A = -exp(A_log); vLLM's
+    kernels exponentiate A_log themselves, so passing it straight through
+    applies exp twice."""
+    nk, ratio = 4, 3
     nv = nk * ratio
-    ad = _adapter(nk=nk, nv=nv, hv=hv)
-    name = "model.layers.0.linear_attn.out_proj.weight"
-    ad._weight_type_map = {name: "Q5_K"}  # 256-element blocks
-    src = torch.zeros((8, nv * 88), dtype=torch.uint8)
-    with pytest.raises(RuntimeError, match="whole Q5_K blocks"):
-        ad.transform_weight(name, src)
-
-
-def test_misaligned_out_proj_is_flagged_for_dequantisation():
-    nk, ratio, hv = 4, 3, 128
-    nv = nk * ratio
-    ad = _adapter(nk=nk, nv=nv, hv=hv)
-    name = "model.layers.0.linear_attn.out_proj.weight"
-    flagged = ad._qwen35_dequant_on_load({name: "Q5_K"})
-    assert flagged == {name}
-    # Q8_0 packs 32 elements, so a 128-element head is 4 whole blocks.
-    assert ad._qwen35_dequant_on_load({name: "Q8_0"}) == set()
-
-
-def test_ratio_one_never_needs_dequantisation():
-    """With 1:1 heads nothing is re-indexed, so nothing must be unpacked."""
-    ad = _adapter(nk=4, nv=4, hv=128)
-    name = "model.layers.0.linear_attn.out_proj.weight"
-    assert ad._qwen35_dequant_on_load({name: "Q5_K"}) == set()
-
-
-def test_dequantised_tensor_is_reindexed_without_alignment_error():
-    """Once unpacked, columns are plain elements and the block constraint
-    no longer applies."""
-    nk, ratio, hv = 4, 3, 2
-    nv = nk * ratio
-    ad = _adapter(nk=nk, nv=nv, hv=hv)
-    name = "model.layers.0.linear_attn.out_proj.weight"
-    ad._weight_type_map = {name: "Q5_K"}
-    src = torch.arange(2 * nv * hv, dtype=torch.float32).reshape(2, nv * hv)
-    out = ad.transform_weight(name, src)
-    assert out.shape == src.shape
-    assert not torch.equal(out, src)
-    # Column block for HF head 0 must come from ggml head 0 (r=0, g=0).
-    assert torch.equal(out[:, :hv], src[:, :hv])
-    # HF head 1 is (g=0, r=1), i.e. ggml index nk.
-    assert torch.equal(out[:, hv : 2 * hv], src[:, nk * hv : (nk + 1) * hv])
-
-
-def test_qweight_type_scalar_dropped_for_dequantised_tensor():
-    ad = _adapter(nk=4, nv=12, hv=128)
-    base = "model.layers.0.linear_attn.out_proj.weight"
-    ad._dequant_on_load = {base}
-    ad._weight_type_map = {base: "Q5_K"}
-    name, _, skip = ad._maybe_dequantize_on_load(
-        "model.layers.0.linear_attn.out_proj.qweight_type",
-        torch.tensor([13], dtype=torch.uint8),
-    )
-    assert skip is True
-
-
-def test_block_aligned_head_is_permitted():
-    nk, ratio, hv = 4, 3, 128
-    nv = nk * ratio
-    ad = _adapter(nk=nk, nv=nv, hv=hv)
-    name = "model.layers.0.linear_attn.out_proj.weight"
-    ad._weight_type_map = {name: "Q8_0"}  # 32-element blocks
-    src = torch.zeros((8, nv * 136), dtype=torch.uint8)
-    ad.transform_weight(name, src)  # must not raise
+    cfg = _Cfg(nk=nk, nv=nv, hv=1)
+    a_log = torch.arange(nv, dtype=torch.float32).reshape(nv, 1)
+    out = _restore(cfg, "model.layers.0.linear_attn.A_log", -torch.exp(a_log))
+    expected = a_log[_ggml_head_order(nk, ratio)]
+    torch.testing.assert_close(out, expected)

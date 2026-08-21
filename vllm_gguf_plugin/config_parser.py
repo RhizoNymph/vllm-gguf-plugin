@@ -14,6 +14,7 @@ from .gguf_utils import (
     maybe_patch_hf_config_from_gguf,
     split_remote_gguf,
 )
+from .weights_adapter import get_adapter_architecture
 
 
 def _find_local_gguf_file(model: str | Path) -> str | None:
@@ -68,12 +69,17 @@ class GGUFConfigParser(ConfigParserBase):
             config_dict["norm_topk_prob"] = True
             config.update({"norm_topk_prob": True})
 
-        if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
+        architecture = get_adapter_architecture(config)
+        if (
+            architecture is None
+            and config.model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+        ):
+            architecture = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
+        if architecture is None:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
 
-        model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
-        config_dict["architectures"] = [model_type]
-        config.update({"architectures": [model_type]})
+        config_dict["architectures"] = [architecture]
+        config.update({"architectures": [architecture]})
 
         patch_source = gguf_file_path if gguf_file_path is not None else original_model
         if is_gguf(patch_source):

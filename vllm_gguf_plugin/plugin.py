@@ -142,9 +142,21 @@ def _patch_engine_args() -> None:
             if self.served_model_name is None:
                 self.served_model_name = [gguf_model]
             hf_config_path = self.hf_config_path
-            if hf_config_path is None and check_gguf_file(str(gguf_weights)):
-                self.hf_config_path = gguf_weights
             tokenizer = self.tokenizer if isinstance(self.tokenizer, str) else None
+            # Reading the config out of the GGUF is a *fallback* for pure-GGUF
+            # sources that ship no config.json. Only do it when nothing better
+            # exists: an explicit --hf-config-path, or a tokenizer repo, is a
+            # full HF config, including the vision section that a text-only
+            # backbone GGUF cannot supply. Pinning the GGUF unconditionally
+            # strips that section while the adapter still declares the
+            # multimodal architecture, so vLLM builds a multimodal processor
+            # against a text config and fails on the type mismatch.
+            if (
+                hf_config_path is None
+                and (tokenizer is None or _is_gguf_reference(tokenizer))
+                and check_gguf_file(str(gguf_weights))
+            ):
+                self.hf_config_path = gguf_weights
             self.model = _get_gguf_config_source(
                 gguf_weights,
                 tokenizer,
@@ -162,6 +174,27 @@ def _patch_engine_args() -> None:
 
     EngineArgs.create_model_config = create_model_config
     EngineArgs._gguf_create_model_config_patched = True
+
+    original_create_speculative_config = EngineArgs.create_speculative_config
+
+    @wraps(original_create_speculative_config)
+    def create_speculative_config(self, *args, **kwargs):
+        configured_model = getattr(self, "spec_model", None)
+        if self.speculative_config is not None:
+            configured_model = configured_model or self.speculative_config.get("model")
+
+        config = original_create_speculative_config(self, *args, **kwargs)
+        gguf_model = self.model_weights
+        if (
+            config is not None
+            and config.method == "mtp"
+            and configured_model is None
+            and _is_gguf_reference(gguf_model)
+        ):
+            config.draft_model_config.model_weights = gguf_model
+        return config
+
+    EngineArgs.create_speculative_config = create_speculative_config
 
 
 def _patch_speculator_probe() -> None:

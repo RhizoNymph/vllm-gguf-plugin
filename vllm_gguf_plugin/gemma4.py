@@ -6,7 +6,7 @@ Transformers ships ``GGUF_CONFIG_MAPPING`` with entries for gemma2/gemma3
 but not gemma4, so ``load_gguf_checkpoint`` raises before vLLM ever sees a
 gemma4 GGUF. The ``gguf`` library *does* know the ``gemma4`` architecture, so
 once the config is parsed the default weights adapter maps tensors correctly
-(see ``weights_adapter/default.py``). This module teaches transformers about
+(see ``weights_adapter/transformers.py``). This module teaches transformers about
 gemma4 at the config and tokenizer level via two idempotent monkeypatches that
 are installed from ``plugin.register()``.
 """

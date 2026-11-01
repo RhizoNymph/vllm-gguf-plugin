@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 import os
 
 import gguf
@@ -62,6 +63,39 @@ from .utils import (
 _MMQ_SAFE = int(os.environ.get("VLLM_GGUF_MMQ_SAFE", "0"))
 
 
+# Whether ggml_mul_mat_a8 runs the vendored llama.cpp tensor-core MMQ kernel. Read with
+# the same rule as the extension (gguf_kernel.cu, mma_mmq_enabled): set and not "0".
+_MMA_MMQ_ENV = os.environ.get("VLLM_GGUF_MMA_MMQ", "")
+_MMA_MMQ = _MMA_MMQ_ENV != "" and not _MMA_MMQ_ENV.startswith("0")
+
+
+@functools.cache
+def _mma_capable(device_index: int) -> bool:
+    """Turing or newer: the MMA kernels' own condition (turing_mma_available)."""
+    return torch.cuda.get_device_capability(device_index) >= (7, 5)
+
+
+def _mmvq_max_rows(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int) -> int:
+    """Largest batch the vector kernel (MMVQ) takes.
+
+    The plugin's MMVQ handles one activation row per pass, so its cost grows linearly
+    with the batch. The tensor-core MMQ kernel reads the weight once for up to 128 rows:
+    on an RTX 3090 with Qwen3.6-27B weights it is already faster at two rows (Q4_K
+    17408x5120: 98 us vs 135 us at M=2, 99 us vs 512 us at M=8), so with it enabled only
+    single-row GEMMs keep MMVQ.
+    """
+    if (
+        _MMA_MMQ
+        and qweight_type in MMQ_QUANT_TYPES
+        and x.is_cuda
+        and _mma_capable(x.device.index if x.device.index is not None else 0)
+    ):
+        return 1
+    if qweight_type in IMATRIX_QUANT_TYPES:
+        return 8 if qweight.shape[0] > 5120 else 16
+    return 2 if qweight.shape[0] > 5120 else 6
+
+
 def _dequant_gemm(
     x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
 ) -> torch.Tensor:
@@ -84,10 +118,7 @@ def _prefer_dequant_gemm(x: torch.Tensor, qweight_type: int) -> bool:
 def _fused_mul_mat_gguf(
     x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
 ) -> torch.Tensor:
-    if qweight_type in IMATRIX_QUANT_TYPES:
-        mmvq_safe = 8 if qweight.shape[0] > 5120 else 16
-    else:
-        mmvq_safe = 2 if qweight.shape[0] > 5120 else 6
+    mmvq_safe = _mmvq_max_rows(x, qweight, qweight_type)
     if x.shape[0] == 0:
         return torch.empty(x.shape[0], qweight.shape[0], dtype=x.dtype, device=x.device)
     if qweight_type in UNQUANTIZED_TYPES:
@@ -128,6 +159,13 @@ except AttributeError as error:
 @register_weight_loader_v2_supported_method
 class GGUFLinearMethod(LinearMethodBase):
     """Linear method for GGUF."""
+
+    # Store merged layers whose shards have different quant types (Qwen3.5's
+    # in_proj_qkvz: Q6_K/Q4_K qkv + Q5_K z; attention qkv: Q4_K q, k + Q6_K v) as one
+    # contiguous weight per run of same-typed shards, instead of slicing and copying
+    # the padded merged weight on every call. Subclasses with their own apply() that
+    # reads the padded weight turn it off.
+    split_mixed_shards = True
 
     def __init__(
         self,
@@ -208,6 +246,40 @@ class GGUFLinearMethod(LinearMethodBase):
                 f"Unsupported GGUF quantization type {qweight_type} in layer {layer}."
             )
         self._create_padded_weight_param(layer)
+        if self.split_mixed_shards:
+            self._split_mixed_shard_groups(layer)
+
+    def _split_mixed_shard_groups(self, layer: torch.nn.Module) -> None:
+        """Mixed-type merged weight -> `qweight_group<i>` parameters, one per run of
+        consecutive same-typed shards, in output order; `layer.gguf_shard_groups` names
+        them with their types. The padded merged data is released."""
+        qweight = layer.qweight
+        shard_ids = list(qweight.shard_id)
+        if not shard_ids:
+            return
+        order = ["q", "k", "v"] if "q" in shard_ids else shard_ids
+        fallback = layer.qweight_type.weight_type
+        types = [layer.qweight_type.shard_weight_type.get(i, fallback) for i in order]
+        if len(set(types)) == 1:
+            return
+        runs: list[list[int]] = []  # [start, end, width, type]
+        for idx, wtype in zip(order, types):
+            start, end, width = qweight.shard_offset_map[idx]
+            last = runs[-1] if runs else None
+            if last and last[3] == wtype and last[1] == start and last[2] == width:
+                last[1] = end
+            else:
+                runs.append([start, end, width, wtype])
+        groups = []
+        for i, (start, end, width, wtype) in enumerate(runs):
+            name = f"qweight_group{i}"
+            # clone, not contiguous(): a slice that is already contiguous would be a view
+            # keeping the whole padded merged weight alive.
+            data = qweight.data[start:end, :width].clone()
+            layer.register_parameter(name, torch.nn.Parameter(data, requires_grad=False))
+            groups.append((name, int(wtype)))
+        layer.gguf_shard_groups = tuple(groups)
+        qweight.data = torch.empty(0, dtype=qweight.dtype, device=qweight.device)
 
     def _materialize_gguf_parameters(self, layer: torch.nn.Module) -> None:
         self._materialize_qweight(layer)
@@ -278,6 +350,16 @@ class GGUFLinearMethod(LinearMethodBase):
 
         if self.layout is not None:
             x = self.layout.input_to_gguf(x)
+
+        groups = getattr(layer, "gguf_shard_groups", None)
+        if groups is not None:
+            out = torch.cat(
+                [fused_mul_mat_gguf_op(x, getattr(layer, name), wtype) for name, wtype in groups],
+                dim=1,
+            )
+            if bias is not None:
+                out.add_(bias)
+            return out
 
         shard_id = layer.qweight.shard_id
         if shard_id:

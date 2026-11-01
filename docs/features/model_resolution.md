@@ -71,12 +71,28 @@ sibling been an architecture transformers *does* know, it would not have raised
 at all: vLLM would have served Qwen weights through a foreign tokenizer and
 produced garbage.
 
+## Same-checkpoint drafts (MTP)
+
+A speculative draft that reuses the target checkpoint (`method: mtp` without a
+`model` of its own; the GGUF's `nextn` block) is built by vLLM's
+`SpeculativeConfig.__post_init__` as `ModelConfig(model=target.model,
+runner="draft", ...)`. For a GGUF target `target.model` is the directory from
+step 4 and the draft gets no `hf_config_path`, so its config was parsed from
+the first `.gguf` in that directory — the same Laguna failure as below, for
+the draft only. `_patch_engine_args` therefore wraps `create_speculative_config`
+in `_draft_inherits_target_hf_config`, which, while the speculative config is
+built, gives a draft `ModelConfig` for the target's directory the target's
+`hf_config_path`. The draft's `model_weights` is then pinned to the target
+file as before. A draft with its own `model` is left alone.
+
 ## Invariants
 
 - Exactly one `.gguf` backs a served model; config, tokenizer, and weights all
   resolve to it.
 - Once resolved, the file is never re-derived by globbing a directory.
 - An explicitly supplied `--tokenizer` is never overridden.
+- A same-checkpoint draft reads its config from the target's file, never from
+  the directory.
 - Directory scanning is a last resort, and never silent when ambiguous.
 - `mmproj*` and `*mtp*` files are sidecars, not model candidates.
 
@@ -84,8 +100,8 @@ produced garbage.
 
 | File | Role |
 |---|---|
-| `vllm_gguf_plugin/plugin.py` | `_resolve_gguf_weights`, `_find_local_gguf_file`, `_get_gguf_config_source`, `_patch_engine_args` |
+| `vllm_gguf_plugin/plugin.py` | `_resolve_gguf_weights`, `_find_local_gguf_file`, `_get_gguf_config_source`, `_patch_engine_args`, `_draft_inherits_target_hf_config` |
 | `vllm_gguf_plugin/gemma4.py` | `_patch_gemma4_tokenizer` — tokenizer path normalisation and gemma4 BOS fixups |
 | `vllm_gguf_plugin/gguf_utils.py` | remote/quant reference parsing, `download_gguf`, `resolve_local_gguf` |
-| `tests/test_plugin.py` | engine-args rewriting, tokenizer pinning |
+| `tests/test_plugin.py` | engine-args rewriting, tokenizer pinning, same-checkpoint draft config |
 | `tests/test_gguf_tokenizer_resolution.py` | tokenizer path normalisation and ambiguity warning |

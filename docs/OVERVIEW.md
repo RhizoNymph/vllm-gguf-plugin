@@ -63,7 +63,7 @@ Features Index:
       Resolving a GGUF reference to one concrete file, and keeping every
       downstream consumer (config, tokenizer, weights) pointed at that same
       file.
-    entry_points: [vllm_gguf_plugin.plugin.register, EngineArgs.create_model_config]
+    entry_points: [vllm_gguf_plugin.plugin.register, EngineArgs.create_model_config, EngineArgs.create_speculative_config]
     depends_on: []
     doc: docs/features/model_resolution.md
   hybrid_models:

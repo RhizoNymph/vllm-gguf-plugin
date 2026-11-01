@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
 import os
 
 import torch
@@ -141,6 +142,18 @@ if (
     ) -> torch.Tensor:
         return torch.empty((X.size(0), row), dtype=X.dtype, device=W.device)
 
+    if hasattr(torch.ops._C_gguf, "ggml_mul_mat_w8a8"):
+
+        @register_fake("_C_gguf::ggml_mul_mat_w8a8")
+        def _ggml_mul_mat_w8a8_fake(
+            W: torch.Tensor,
+            X: torch.Tensor,
+            quant_type: int,
+            row: torch.SymInt,
+            group: int,
+        ) -> torch.Tensor:
+            return torch.empty((X.size(0), row), dtype=X.dtype, device=W.device)
+
     @register_fake("_C_gguf::ggml_moe_a8")
     def _ggml_moe_a8_fake(
         X: torch.Tensor,
@@ -206,6 +219,46 @@ def ggml_mul_mat_a8(
     if _cuda_gemm_kernel_available("ggml_mul_mat_a8", quant_type):
         return torch.ops._C_gguf.ggml_mul_mat_a8(W, X, quant_type, row)
     return ggml_mul_mat_a8_triton(W, X, quant_type, row)
+
+
+def w8a8_available() -> bool:
+    """True when the extension has the W8A8 prefill GEMM (csrc/gguf/w8a8)."""
+    return _cuda_kernel_available("ggml_mul_mat_w8a8")
+
+
+@functools.cache
+def w8a8_supported(quant_type: int, row: int, col: int, group: int) -> bool:
+    """True when the W8A8 GEMM computes this weight type, shape and group (cached:
+    asked on every prefill GEMM)."""
+    return torch.ops._C_gguf.w8a8_supported(int(quant_type), int(row), int(col), int(group))
+
+
+def ggml_mul_mat_w8a8(
+    W: torch.Tensor, X: torch.Tensor, quant_type: int, row: int, group: int
+) -> torch.Tensor:
+    """X @ dequant(W).T through the group-scaled int8 tensor-core GEMM: W re-quantised
+    and X quantised to int8 with one scale per (row, `group` K values)."""
+    return torch.ops._C_gguf.ggml_mul_mat_w8a8(W, X, int(quant_type), row, group)
+
+
+def w8a8_quantize_act(X: torch.Tensor, aq: torch.Tensor, sa: torch.Tensor, group: int) -> None:
+    """Stage 1 of ggml_mul_mat_w8a8, into caller-provided outputs (tests, timing)."""
+    torch.ops._C_gguf.w8a8_quantize_act(X, aq, sa, group)
+
+
+def w8a8_requant_weight(
+    W: torch.Tensor, bq: torch.Tensor, sb: torch.Tensor, quant_type: int, group: int
+) -> None:
+    """Stage 2 of ggml_mul_mat_w8a8: GGUF blocks -> int8 [N, K] + scales [K / G, N]."""
+    torch.ops._C_gguf.w8a8_requant_weight(W, bq, sb, int(quant_type), group)
+
+
+def w8a8_gemm(
+    aq: torch.Tensor, sa: torch.Tensor, bq: torch.Tensor, sb: torch.Tensor,
+    Y: torch.Tensor, group: int,
+) -> None:
+    """Stage 3 of ggml_mul_mat_w8a8: the group-scaled int8 GEMM into Y."""
+    torch.ops._C_gguf.w8a8_gemm(aq, sa, bq, sb, Y, group)
 
 
 def ggml_moe_a8(

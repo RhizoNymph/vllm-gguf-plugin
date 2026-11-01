@@ -69,7 +69,14 @@ if _should_build_extension():
                     "vllm_gguf_plugin/csrc/gguf/mmq_mma.cu",
                     "vllm_gguf_plugin/csrc/gguf/mmq_mma_quantize.cu",
                     "vllm_gguf_plugin/csrc/gguf/mmq_mma_shim.cu",
+                    # Vendored llama.cpp multi-column MMVQ (llamacpp/mmvq.cu,
+                    # included by this TU).
+                    "vllm_gguf_plugin/csrc/gguf/mmvq_ggml.cu",
                     "vllm_gguf_plugin/csrc/gguf/llamacpp/quantize.cu",
+                    # Group-scaled int8 tensor-core GEMM for prefill (W8A8).
+                    "vllm_gguf_plugin/csrc/gguf/w8a8/quantize.cu",
+                    "vllm_gguf_plugin/csrc/gguf/w8a8/gemm.cu",
+                    "vllm_gguf_plugin/csrc/gguf/w8a8/op.cu",
                 ]
                 + sorted(
                     str(p)

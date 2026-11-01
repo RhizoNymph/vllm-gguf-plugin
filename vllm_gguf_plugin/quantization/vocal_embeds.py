@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from functools import partial
 
 import gguf
@@ -13,7 +14,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    direct_register_custom_op,
+    get_accelerator_view_from_cpu_tensor,
+)
 
 from .. import ops
 from .linear import GGUFLinearMethod
@@ -26,6 +30,15 @@ from .params import (
     _materialize_gguf_weight_type_parameter,
 )
 from .utils import DEQUANT_TYPES, UNQUANTIZED_TYPES
+
+
+# Keep the quantized input-embedding table in pinned host memory and read it from
+# the GPU through UVA (VLLM_GGUF_EMBED_ON_HOST=1). A lookup touches only the rows of
+# the tokens in the batch (a few KB per token over PCIe), while the table itself is
+# large: Qwen3.6-27B's Q4_K token_embd is 0.70 GB, which on a 24 GB card is ~24 KV
+# blocks of this hybrid model. The output head (ParallelLMHead) reads its whole
+# weight every step and always stays in device memory.
+_EMBED_ON_HOST = os.environ.get("VLLM_GGUF_EMBED_ON_HOST", "0") not in ("", "0")
 
 
 def recursive_replace_vocab_modules(
@@ -120,6 +133,19 @@ except AttributeError as error:
     raise error
 
 
+def _move_qweight_to_host(layer: torch.nn.Module) -> None:
+    """Replace `layer.qweight`'s device storage with a UVA view of a pinned host copy.
+
+    The host tensor is kept on the layer so the view's memory stays valid."""
+    qweight = layer.qweight
+    if not qweight.is_cuda:
+        return
+    host = torch.empty(qweight.shape, dtype=qweight.dtype, pin_memory=True)
+    host.copy_(qweight.data)
+    layer._gguf_host_qweight = host
+    qweight.data = get_accelerator_view_from_cpu_tensor(host)
+
+
 class GGUFEmbeddingMethod(GGUFLinearMethod):
     """Embedding method for GGUF."""
 
@@ -182,6 +208,11 @@ class GGUFEmbeddingMethod(GGUFLinearMethod):
             "qweight_type",
             fallback_weight_loader=_gguf_embedding_weight_type_loader,
         )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module):
+        super().process_weights_after_loading(layer)
+        if _EMBED_ON_HOST and not isinstance(layer, ParallelLMHead):
+            _move_qweight_to_host(layer)
 
     def embedding(self, layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
         from . import apply_gguf_embedding as apply_gguf_embedding_op

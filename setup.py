@@ -69,6 +69,9 @@ if _should_build_extension():
                     "vllm_gguf_plugin/csrc/gguf/mmq_mma.cu",
                     "vllm_gguf_plugin/csrc/gguf/mmq_mma_quantize.cu",
                     "vllm_gguf_plugin/csrc/gguf/mmq_mma_shim.cu",
+                    # Vendored llama.cpp multi-column MMVQ (llamacpp/mmvq.cu,
+                    # included by this TU).
+                    "vllm_gguf_plugin/csrc/gguf/mmvq_ggml.cu",
                     "vllm_gguf_plugin/csrc/gguf/llamacpp/quantize.cu",
                 ]
                 + sorted(

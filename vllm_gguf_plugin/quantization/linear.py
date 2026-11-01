@@ -67,6 +67,15 @@ _MMQ_SAFE = int(os.environ.get("VLLM_GGUF_MMQ_SAFE", "0"))
 # the same rule as the extension (gguf_kernel.cu, mma_mmq_enabled): set and not "0".
 _MMA_MMQ_ENV = os.environ.get("VLLM_GGUF_MMA_MMQ", "")
 _MMA_MMQ = _MMA_MMQ_ENV != "" and not _MMA_MMQ_ENV.startswith("0")
+# Whether ggml_mul_mat_vec_a8 runs the vendored llama.cpp multi-column MMVQ
+# (gguf_kernel.cu, mmvq_multi_enabled), which reads each weight block once for up to
+# 8 activation rows.
+_MMVQ_MULTI_ENV = os.environ.get("VLLM_GGUF_MMVQ_MULTI", "")
+_MMVQ_MULTI = _MMVQ_MULTI_ENV != "" and not _MMVQ_MULTI_ENV.startswith("0")
+# Rows up to which multi-column MMVQ beats tensor-core MMQ. RTX 3090, Qwen3.6-27B
+# weights: Q4_K 17408x5120 64/69/83/106 us at M=1/2/3/4 vs MMQ 95-97 us; Q6_K and
+# Q8_0 stay ahead to M=4, Q4_K/Q5_K cross over between 3 and 4.
+_MMVQ_MULTI_MAX_ROWS = 3
 
 
 @functools.cache
@@ -82,7 +91,7 @@ def _mmvq_max_rows(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int) ->
     with the batch. The tensor-core MMQ kernel reads the weight once for up to 128 rows:
     on an RTX 3090 with Qwen3.6-27B weights it is already faster at two rows (Q4_K
     17408x5120: 98 us vs 135 us at M=2, 99 us vs 512 us at M=8), so with it enabled only
-    single-row GEMMs keep MMVQ.
+    single-row GEMMs keep MMVQ -- or up to three rows with the multi-column MMVQ.
     """
     if (
         _MMA_MMQ
@@ -90,7 +99,7 @@ def _mmvq_max_rows(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int) ->
         and x.is_cuda
         and _mma_capable(x.device.index if x.device.index is not None else 0)
     ):
-        return 1
+        return _MMVQ_MULTI_MAX_ROWS if _MMVQ_MULTI else 1
     if qweight_type in IMATRIX_QUANT_TYPES:
         return 8 if qweight.shape[0] > 5120 else 16
     return 2 if qweight.shape[0] > 5120 else 6

@@ -102,11 +102,31 @@ def _mma(enabled):
         gguf_linear._MMA_MMQ = previous
 
 
+@contextlib.contextmanager
+def _mmvq_multi(enabled):
+    previous = gguf_linear._MMVQ_MULTI
+    gguf_linear._MMVQ_MULTI = enabled
+    try:
+        yield
+    finally:
+        gguf_linear._MMVQ_MULTI = previous
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_mmvq_threshold_with_mma_and_multi_column_mmvq():
+    w = _weight(Q4K)
+    x = torch.empty((4, HIDDEN_SIZE), dtype=torch.bfloat16, device="cuda")
+    with _mma(True), _mmvq_multi(True):
+        assert gguf_linear._mmvq_max_rows(x, w, int(Q4K)) == 3
+    with _mma(False), _mmvq_multi(True):
+        assert gguf_linear._mmvq_max_rows(x, w, int(Q4K)) == 6
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 def test_mmvq_threshold_with_mma_is_one_row():
     w = _weight(Q4K)
     x = torch.empty((4, HIDDEN_SIZE), dtype=torch.bfloat16, device="cuda")
-    with _mma(True):
+    with _mma(True), _mmvq_multi(False):
         assert gguf_linear._mmvq_max_rows(x, w, int(Q4K)) == 1
     with _mma(False):
         assert gguf_linear._mmvq_max_rows(x, w, int(Q4K)) == 6

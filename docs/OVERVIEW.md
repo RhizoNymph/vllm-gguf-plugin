@@ -63,7 +63,7 @@ Features Index:
       Resolving a GGUF reference to one concrete file, and keeping every
       downstream consumer (config, tokenizer, weights) pointed at that same
       file.
-    entry_points: [vllm_gguf_plugin.plugin.register, EngineArgs.create_model_config]
+    entry_points: [vllm_gguf_plugin.plugin.register, EngineArgs.create_model_config, EngineArgs.create_speculative_config]
     depends_on: []
     doc: docs/features/model_resolution.md
   hybrid_models:
@@ -85,6 +85,19 @@ Features Index:
       - vllm_gguf_plugin.tokenizer.gguf_special_token_kwargs
     depends_on: [model_resolution]
     doc: docs/features/tokenizer_added_tokens.md
+  gguf_gemm_paths:
+    description: >
+      Kernel choice per batch size for GGUF linears (MMVQ, multi-column MMVQ,
+      tensor-core MMQ, dequantize+cuBLAS; env gates VLLM_GGUF_MMA_MMQ,
+      VLLM_GGUF_MMVQ_MULTI, VLLM_GGUF_MMQ_SAFE), per-group storage of
+      mixed-type merged weights, and the host-resident input embedding
+      (VLLM_GGUF_EMBED_ON_HOST).
+    entry_points:
+      - vllm_gguf_plugin.quantization.linear.GGUFLinearMethod
+      - vllm_gguf_plugin.quantization.linear._fused_mul_mat_gguf
+      - vllm_gguf_plugin.quantization.vocal_embeds.GGUFEmbeddingMethod
+    depends_on: []
+    doc: docs/features/gguf_gemm_paths.md
 ```
 
 ## Invariants

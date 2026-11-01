@@ -4,6 +4,7 @@ import gc
 import weakref
 
 import torch
+import vllm.config.speculative as speculative_config_module
 import vllm.engine.arg_utils as arg_utils_module
 import vllm.model_executor.layers.linear as linear_module
 import vllm.model_executor.layers.vocab_parallel_embedding as vocab_embedding_module
@@ -410,6 +411,74 @@ def test_register_preserves_qwen35_mamba_block_size_without_prefix_cache(
     engine_args.create_model_config()
 
     assert engine_args.mamba_block_size == 1024
+
+
+class _FakeSpeculativeConfig:
+    """Stands in for SpeculativeConfig: builds the same-checkpoint draft
+    ModelConfig the way ``SpeculativeConfig.__post_init__`` does for MTP."""
+
+    def __init__(self, target_model_config, target_parallel_config, **kwargs):
+        self.method = kwargs.get("method")
+        self.draft_model_config = speculative_config_module.ModelConfig(
+            model=target_model_config.model,
+            runner="draft",
+            tokenizer=target_model_config.tokenizer,
+        )
+
+
+class _Recorded:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.model_weights = ""
+
+
+def _mtp_engine_args(tmp_path, monkeypatch):
+    register()
+    qwen_path = tmp_path / "Qwen3.6-27B-UD-Q4_K_XL.gguf"
+    qwen_path.write_bytes(b"GGUF")
+    # Sorts ahead of the target, so globbing the directory would pick it.
+    (tmp_path / "Laguna-XS-2.1-Q4_K_M.gguf").write_bytes(b"GGUF")
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", lambda **kwargs: kwargs)
+    monkeypatch.setattr(arg_utils_module, "SpeculativeConfig", _FakeSpeculativeConfig)
+    monkeypatch.setattr(speculative_config_module, "ModelConfig", _Recorded)
+    engine_args = EngineArgs(
+        model=str(qwen_path),
+        speculative_config={"method": "mtp", "num_speculative_tokens": 1},
+    )
+    target = type("Target", (), {})()
+    for key, value in engine_args.create_model_config().items():
+        setattr(target, key, value)
+    return engine_args, target, qwen_path
+
+
+def test_mtp_draft_config_is_read_from_the_target_gguf(tmp_path, monkeypatch):
+    """A same-checkpoint MTP draft must parse the target's .gguf, not the
+    first .gguf in the target's directory."""
+    engine_args, target, qwen_path = _mtp_engine_args(tmp_path, monkeypatch)
+    assert target.model == str(tmp_path)
+
+    config = engine_args.create_speculative_config(target, None)
+
+    draft_kwargs = config.draft_model_config.kwargs
+    assert draft_kwargs["model"] == str(tmp_path)
+    assert draft_kwargs["hf_config_path"] == str(qwen_path)
+    assert config.draft_model_config.model_weights == str(qwen_path)
+    # The module's ModelConfig is restored after the speculative config is built.
+    assert speculative_config_module.ModelConfig is _Recorded
+
+
+def test_explicit_draft_model_keeps_its_own_config(tmp_path, monkeypatch):
+    """A separately configured draft model is not pinned to the target file."""
+    engine_args, target, _ = _mtp_engine_args(tmp_path, monkeypatch)
+    engine_args.speculative_config = {
+        "method": "mtp",
+        "model": "/elsewhere/draft",
+        "num_speculative_tokens": 1,
+    }
+
+    config = engine_args.create_speculative_config(target, None)
+
+    assert "hf_config_path" not in config.draft_model_config.kwargs
 
 
 def test_register_skips_speculator_probe_for_gguf():

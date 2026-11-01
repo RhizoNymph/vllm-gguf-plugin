@@ -17,6 +17,7 @@
 #include "moe.cuh"
 #include "moe_vec.cuh"
 #include "mmq_mma.h"
+#include "mmvq_ggml.h"
 
 #include <cstdlib>
 
@@ -93,7 +94,8 @@ Tensor ggml_dequantize(Tensor W,  // quant weight
   const int32_t device_idx = W.get_device_index();
   const DeviceGuard device_guard(device_idx);
   const auto dtype_ = dtype.value_or(ScalarType::Half);
-  Tensor DW = torch::stable::new_zeros(W, {m, n}, dtype_);
+  // Every element is written by the dequantize kernel (rows are whole ggml blocks).
+  Tensor DW = torch::stable::new_empty(W, {m, n}, dtype_);
   cudaStream_t stream = get_current_cuda_stream(device_idx);
 
   VLLM_DISPATCH_FLOATING_TYPES(DW.scalar_type(), "ggml_dequantize", [&] {
@@ -104,6 +106,17 @@ Tensor ggml_dequantize(Tensor W,  // quant weight
   return DW;
 }
 
+// Opt-in routing of small batches to the vendored llama.cpp multi-column MMVQ
+// (VLLM_GGUF_MMVQ_MULTI=1), which reads each weight block once for up to 8
+// activation rows instead of once per row.
+static bool mmvq_multi_enabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("VLLM_GGUF_MMVQ_MULTI");
+    return v != nullptr && v[0] != '\0' && v[0] != '0';
+  }();
+  return enabled;
+}
+
 Tensor ggml_mul_mat_vec_a8(Tensor W,  // quant weight
                            Tensor X,  // input
                            int64_t type, int64_t row) {
@@ -112,10 +125,35 @@ Tensor ggml_mul_mat_vec_a8(Tensor W,  // quant weight
   const int64_t padded = (col + 512 - 1) / 512 * 512;
   const int32_t device_idx = X.get_device_index();
   const DeviceGuard device_guard(device_idx);
-  Tensor Y = torch::stable::new_zeros(W, {vecs, row}, X.scalar_type());
+  // mul_mat_vec_q writes dst[vec * nrows + row] for every (vec, row).
+  Tensor Y = torch::stable::new_empty(W, {vecs, row}, X.scalar_type());
   cudaStream_t stream = get_current_cuda_stream(device_idx);
   Tensor quant_X =
       torch::stable::new_empty(W, {vecs, padded / 32 * 9}, ScalarType::Int);
+  if (mmvq_multi_enabled() &&
+      gguf_mmvq::supported(static_cast<int>(type), vecs)) {
+    Tensor y_f32 = torch::stable::new_empty(W, {vecs, row}, ScalarType::Float);
+    gguf_mma::DType dt = gguf_mma::DType::F32;
+    VLLM_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_mul_mat_vec_a8", [&] {
+      quantize_row_q8_1_cuda<scalar_t>(
+          (scalar_t*)X.data_ptr(), (void*)quant_X.data_ptr(), col, vecs, stream);
+    });
+    switch (X.scalar_type()) {
+      case ScalarType::Half:
+        dt = gguf_mma::DType::F16;
+        break;
+      case ScalarType::BFloat16:
+        dt = gguf_mma::DType::BF16;
+        break;
+      default:
+        break;
+    }
+    gguf_mmvq::launch(W.data_ptr(), static_cast<int>(type), quant_X.data_ptr(),
+                      (float*)y_f32.data_ptr(), vecs, row, col, stream);
+    gguf_mma::from_f32((const float*)y_f32.data_ptr(), Y.data_ptr(), dt,
+                       vecs * row, stream);
+    return Y;
+  }
   VLLM_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_mul_mat_vec_a8", [&] {
     quantize_row_q8_1_cuda<scalar_t>(
         (scalar_t*)X.data_ptr(), (void*)quant_X.data_ptr(), col, vecs, stream);
@@ -239,11 +277,12 @@ Tensor ggml_mul_mat_a8(Tensor W,  // quant weight
   int64_t batch = X.sizes()[0];
   const int32_t device_idx = X.get_device_index();
   const DeviceGuard device_guard(device_idx);
-  Tensor Y = torch::stable::new_zeros(W, {batch, row}, X.scalar_type());
   cudaStream_t stream = get_current_cuda_stream(device_idx);
 
   if (mma_mmq_enabled() &&
       gguf_mma::supported(static_cast<int>(type), device_idx)) {
+    // from_f32 below writes all batch * row outputs.
+    Tensor Y = torch::stable::new_empty(W, {batch, row}, X.scalar_type());
     // The vendored kernels are fp32 in / fp32 out, so activations and results
     // stage through float buffers. That is the current cost of this path;
     // templating upstream's quantize and write-back on the element type would
@@ -273,6 +312,7 @@ Tensor ggml_mul_mat_a8(Tensor W,  // quant weight
     return Y;
   }
 
+  Tensor Y = torch::stable::new_zeros(W, {batch, row}, X.scalar_type());
   Tensor quant_X =
       torch::stable::new_empty(W, {batch, padded / 32 * 9}, ScalarType::Int);
   VLLM_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_mul_mat_a8", [&] {

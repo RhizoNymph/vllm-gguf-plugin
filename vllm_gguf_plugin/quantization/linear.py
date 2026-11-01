@@ -78,6 +78,66 @@ _MMVQ_MULTI = _MMVQ_MULTI_ENV != "" and not _MMVQ_MULTI_ENV.startswith("0")
 _MMVQ_MULTI_MAX_ROWS = 3
 
 
+class GGUFW8A8ConfigError(ValueError):
+    """VLLM_GGUF_W8A8 / VLLM_GGUF_W8A8_TYPES hold an unsupported value."""
+
+
+_W8A8_GROUPS = (128, 256)
+_W8A8_DEFAULT_GROUP = 128
+
+
+def _parse_w8a8_group(raw: str) -> int:
+    """VLLM_GGUF_W8A8: unset / "0" -> 0 (off), "1" -> the default group, or a group
+    size (K values per int8 scale) from _W8A8_GROUPS."""
+    raw = raw.strip()
+    if raw in ("", "0"):
+        return 0
+    if raw == "1":
+        return _W8A8_DEFAULT_GROUP
+    if raw.isdigit() and int(raw) in _W8A8_GROUPS:
+        return int(raw)
+    raise GGUFW8A8ConfigError(
+        f"VLLM_GGUF_W8A8={raw!r}: expected 0, 1 or one of {_W8A8_GROUPS}"
+    )
+
+
+# Weight types the W8A8 kernel can decode, and the default subset it is used for.
+# Re-quantising Q6_K / Q8_0 to int8 adds a second rounding that MMQ (which keeps
+# their weights exact) does not: on real Qwen3.6-27B prefill activations W8A8 at
+# G=128 is ~1.6e-2 relative error there vs ~0.9e-2 for MMQ, while on Q4_K / Q5_K
+# it is below MMQ (1.4e-2 vs 1.7e-2 median). End to end, all four types moved
+# greedy replies at non-tie margins (up to 0.875 nats), so by default only Q4_K
+# and Q5_K -- 79% of the model's GEMM FLOPs -- take W8A8.
+_W8A8_TYPE_IDS = {
+    "Q8_0": int(WeightType.Q8_0),
+    "Q4_K": int(WeightType.Q4_K),
+    "Q5_K": int(WeightType.Q5_K),
+    "Q6_K": int(WeightType.Q6_K),
+}
+_W8A8_DEFAULT_TYPES = "Q4_K,Q5_K"
+
+
+def _parse_w8a8_types(raw: str) -> frozenset[int]:
+    """VLLM_GGUF_W8A8_TYPES: comma-separated GGUF type names (default Q4_K,Q5_K)."""
+    names = [n.strip().upper() for n in (raw or _W8A8_DEFAULT_TYPES).split(",") if n.strip()]
+    unknown = [n for n in names if n not in _W8A8_TYPE_IDS]
+    if unknown or not names:
+        raise GGUFW8A8ConfigError(
+            f"VLLM_GGUF_W8A8_TYPES={raw!r}: expected names from {sorted(_W8A8_TYPE_IDS)}"
+        )
+    return frozenset(_W8A8_TYPE_IDS[n] for n in names)
+
+
+# Group-scaled int8 tensor-core GEMM for prefill (csrc/gguf/w8a8). With it on, GEMMs
+# that would take the dequantize+cuBLAS path (M >= VLLM_GGUF_MMQ_SAFE) instead
+# re-quantise the GGUF weight and the activations to int8 with one fp32 scale per
+# (row, group of K values) and run on the int8 MMA, which has twice the bf16
+# tensor-core rate on sm_86. Off by default: it trades accuracy (int8 activations,
+# the MMQ numerics class decode already uses) for prefill speed.
+_W8A8_GROUP = _parse_w8a8_group(os.environ.get("VLLM_GGUF_W8A8", ""))
+_W8A8_TYPES = _parse_w8a8_types(os.environ.get("VLLM_GGUF_W8A8_TYPES", ""))
+
+
 @functools.cache
 def _mma_capable(device_index: int) -> bool:
     """Turing or newer: the MMA kernels' own condition (turing_mma_available)."""
@@ -124,6 +184,21 @@ def _prefer_dequant_gemm(x: torch.Tensor, qweight_type: int) -> bool:
     )
 
 
+def _use_w8a8(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int) -> bool:
+    """True when the W8A8 GEMM is enabled and computes this (prefill-sized) GEMM."""
+    if not _W8A8_GROUP or qweight_type not in _W8A8_TYPES:
+        return False
+    if not x.is_cuda or x.dtype not in (torch.bfloat16, torch.float16):
+        return False
+    if not x.is_contiguous() or not ops.w8a8_available():
+        return False
+    block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
+    cols = qweight.shape[1] // type_size * block_size
+    return cols == x.shape[1] and ops.w8a8_supported(
+        qweight_type, qweight.shape[0], cols, _W8A8_GROUP
+    )
+
+
 def _fused_mul_mat_gguf(
     x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
 ) -> torch.Tensor:
@@ -135,7 +210,12 @@ def _fused_mul_mat_gguf(
     if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
     elif _prefer_dequant_gemm(x, qweight_type):
-        y = _dequant_gemm(x, qweight, qweight_type)
+        if _use_w8a8(x, qweight, qweight_type):
+            y = ops.ggml_mul_mat_w8a8(
+                qweight, x, qweight_type, qweight.shape[0], _W8A8_GROUP
+            )
+        else:
+            y = _dequant_gemm(x, qweight, qweight_type)
     elif qweight_type in MMQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
     elif qweight_type in DEQUANT_TYPES:

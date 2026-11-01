@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 
 import gguf
+import vllm.config.speculative as speculative_config_module
 import vllm.engine.arg_utils as arg_utils_module
 import vllm.transformers_utils.config as config_module
 from vllm.config.load import LoadConfig
@@ -178,12 +181,20 @@ def _patch_engine_args() -> None:
     original_create_speculative_config = EngineArgs.create_speculative_config
 
     @wraps(original_create_speculative_config)
-    def create_speculative_config(self, *args, **kwargs):
+    def create_speculative_config(self, target_model_config, *args, **kwargs):
         configured_model = getattr(self, "spec_model", None)
         if self.speculative_config is not None:
             configured_model = configured_model or self.speculative_config.get("model")
 
-        config = original_create_speculative_config(self, *args, **kwargs)
+        if configured_model is None and _is_gguf_reference(self.model_weights):
+            with _draft_inherits_target_hf_config(target_model_config):
+                config = original_create_speculative_config(
+                    self, target_model_config, *args, **kwargs
+                )
+        else:
+            config = original_create_speculative_config(
+                self, target_model_config, *args, **kwargs
+            )
         gguf_model = self.model_weights
         if (
             config is not None
@@ -195,6 +206,41 @@ def _patch_engine_args() -> None:
         return config
 
     EngineArgs.create_speculative_config = create_speculative_config
+
+
+@contextmanager
+def _draft_inherits_target_hf_config(target_model_config) -> Iterator[None]:
+    """Build a same-checkpoint draft ``ModelConfig`` from the target's config file.
+
+    A draft that reuses the target checkpoint (MTP, DSpark) is created with
+    ``model=target.model``, which for a GGUF target is the *directory* holding
+    the weights, and without the target's ``hf_config_path``. Parsing that
+    directory picks whichever ``.gguf`` sorts first, so a directory holding
+    several GGUFs yields the config of an unrelated model. While the
+    speculative config is built, a draft ``ModelConfig`` for the target's
+    directory is given the target's ``hf_config_path`` instead.
+    """
+    hf_config_path = getattr(target_model_config, "hf_config_path", None)
+    source = getattr(target_model_config, "model", None)
+    original = speculative_config_module.ModelConfig
+    if hf_config_path is None or source is None:
+        yield
+        return
+
+    def model_config(*args, **kwargs):
+        if (
+            kwargs.get("runner") == "draft"
+            and kwargs.get("model") == source
+            and kwargs.get("hf_config_path") is None
+        ):
+            kwargs["hf_config_path"] = hf_config_path
+        return original(*args, **kwargs)
+
+    speculative_config_module.ModelConfig = model_config
+    try:
+        yield
+    finally:
+        speculative_config_module.ModelConfig = original
 
 
 def _patch_speculator_probe() -> None:

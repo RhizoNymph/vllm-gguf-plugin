@@ -18,6 +18,15 @@ Tensor ggml_moe_a8(Tensor X, Tensor W, Tensor sorted_token_ids,
 Tensor ggml_moe_a8_vec(Tensor X, Tensor W, Tensor topk_ids, int64_t top_k,
                        int64_t type, int64_t row, int64_t tokens);
 int64_t ggml_moe_get_block_size(int64_t type);
+// W8A8 prefill GEMM (csrc/gguf/w8a8/op.cu).
+Tensor ggml_mul_mat_w8a8(Tensor W, Tensor X, int64_t type, int64_t row,
+                         int64_t group);
+bool w8a8_supported(int64_t type, int64_t row, int64_t col, int64_t group);
+void w8a8_quantize_act(Tensor X, Tensor aq, Tensor sa, int64_t group);
+void w8a8_requant_weight(Tensor W, Tensor bq, Tensor sb, int64_t type,
+                         int64_t group);
+void w8a8_gemm(Tensor aq, Tensor sa, Tensor bq, Tensor sb, Tensor Y,
+               int64_t group);
 
 STABLE_TORCH_LIBRARY(_C_gguf, ops) {
   ops.def(
@@ -38,6 +47,19 @@ STABLE_TORCH_LIBRARY(_C_gguf, ops) {
       "Tensor topk_ids, int top_k, "
       "int type, SymInt row, SymInt tokens) -> Tensor");
   ops.def("ggml_moe_get_block_size(int type) -> int");
+  ops.def(
+      "ggml_mul_mat_w8a8(Tensor W, Tensor X, int type, SymInt row, int group) "
+      "-> Tensor");
+  ops.def("w8a8_supported(int type, SymInt row, SymInt col, int group) -> bool");
+  ops.def(
+      "w8a8_quantize_act(Tensor X, Tensor(a!) aq, Tensor(b!) sa, int group) "
+      "-> ()");
+  ops.def(
+      "w8a8_requant_weight(Tensor W, Tensor(a!) bq, Tensor(b!) sb, int type, "
+      "int group) -> ()");
+  ops.def(
+      "w8a8_gemm(Tensor aq, Tensor sa, Tensor bq, Tensor sb, Tensor(a!) Y, "
+      "int group) -> ()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C_gguf, CUDA, ops) {
@@ -46,10 +68,15 @@ STABLE_TORCH_LIBRARY_IMPL(_C_gguf, CUDA, ops) {
   ops.impl("ggml_mul_mat_a8", TORCH_BOX(&ggml_mul_mat_a8));
   ops.impl("ggml_moe_a8", TORCH_BOX(&ggml_moe_a8));
   ops.impl("ggml_moe_a8_vec", TORCH_BOX(&ggml_moe_a8_vec));
+  ops.impl("ggml_mul_mat_w8a8", TORCH_BOX(&ggml_mul_mat_w8a8));
+  ops.impl("w8a8_quantize_act", TORCH_BOX(&w8a8_quantize_act));
+  ops.impl("w8a8_requant_weight", TORCH_BOX(&w8a8_requant_weight));
+  ops.impl("w8a8_gemm", TORCH_BOX(&w8a8_gemm));
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C_gguf, CompositeExplicitAutograd, ops) {
   ops.impl("ggml_moe_get_block_size", TORCH_BOX(&ggml_moe_get_block_size));
+  ops.impl("w8a8_supported", TORCH_BOX(&w8a8_supported));
 }
 
 static struct PyModuleDef _module_def = {

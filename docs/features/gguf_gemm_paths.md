@@ -19,7 +19,9 @@ Not in scope: MoE GEMMs (`fused_moe.py`), the Triton fallbacks, weight-name mapp
    custom op (opaque to torch.compile) that dispatches on `M = x.shape[0]`:
    - unquantized types: `x @ W.T`;
    - `M <= _mmvq_max_rows(...)`: `ggml_mul_mat_vec_a8` (MMVQ);
-   - `M >= VLLM_GGUF_MMQ_SAFE` (when > 0): dequantize to `x.dtype`, then cuBLAS;
+   - `M >= VLLM_GGUF_MMQ_SAFE` (when > 0): dequantize to `x.dtype`, then cuBLAS --
+     or, with `VLLM_GGUF_W8A8` on and a supported type/shape, the int8 tensor-core
+     GEMM (docs/features/gguf_w8a8_prefill.md);
    - otherwise `ggml_mul_mat_a8` (MMQ).
 
 `_mmvq_max_rows`:

@@ -42,6 +42,17 @@ QWEN35_ARCHITECTURES = {
     "qwen3_5_moe_text": "Qwen3_5MoeForConditionalGeneration",
 }
 
+# A GGUF with no vision tower (no companion mmproj) keeps a ``*TextConfig``,
+# which the multimodal entry points above cannot consume: their processor
+# dereferences ``vision_config.spatial_merge_size`` and raises. Text-only
+# checkpoints must resolve to the causal-LM classes qwen35.py registers.
+QWEN35_TEXT_ARCHITECTURES = {
+    "qwen3_5": "Qwen3_5ForCausalLM",
+    "qwen3_5_text": "Qwen3_5ForCausalLM",
+    "qwen3_5_moe": "Qwen3_5MoeForCausalLM",
+    "qwen3_5_moe_text": "Qwen3_5MoeForCausalLM",
+}
+
 QWEN35_ATTN_SUBSTR: dict[str, str] = {
     "attn_norm.": "input_layernorm.",
     "post_attention_norm.": "post_attention_layernorm.",
@@ -191,7 +202,12 @@ class Qwen35GGUFAdapter(BaseGGUFWeightsAdapter):
 
     @classmethod
     def architecture(cls, config) -> str | None:
-        return QWEN35_ARCHITECTURES.get(config.model_type)
+        table = (
+            QWEN35_ARCHITECTURES
+            if getattr(config, "vision_config", None) is not None
+            else QWEN35_TEXT_ARCHITECTURES
+        )
+        return table.get(config.model_type)
 
     def patch_hf_config(
         self,
@@ -199,7 +215,6 @@ class Qwen35GGUFAdapter(BaseGGUFWeightsAdapter):
         hf_config: PretrainedConfig,
     ) -> PretrainedConfig:
         model_type = hf_config.model_type
-        architecture = QWEN35_ARCHITECTURES[model_type]
         patched = maybe_patch_hf_config_from_gguf(
             files.primary_backbone,
             hf_config,
@@ -221,8 +236,10 @@ class Qwen35GGUFAdapter(BaseGGUFWeightsAdapter):
                 else Qwen3_5Config
             )
             patched = config_cls(text_config=patched.to_dict())
+            has_vision = True
 
-        patched.architectures = [architecture]
+        table = QWEN35_ARCHITECTURES if has_vision else QWEN35_TEXT_ARCHITECTURES
+        patched.architectures = [table[model_type]]
         return patched
 
     def build_name_map(

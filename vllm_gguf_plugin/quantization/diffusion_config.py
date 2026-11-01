@@ -33,6 +33,9 @@ def dequant_gemm_gguf(
 class DiffusionGGUFLinearMethod(GGUFLinearMethod):
     """GGUF linear method using dequant+GEMM for N-D diffusion tensors."""
 
+    # apply() below slices the padded merged weight itself.
+    split_mixed_shards = False
+
     def apply(
         self,
         layer: torch.nn.Module,

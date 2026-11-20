@@ -22,6 +22,10 @@ def is_layer_skipped_gguf(
             for shard_proj_name in fused_mapping[proj_name]
         ]
 
+        # apply_vllm_mapper may already have renamed the shards to the fused
+        # module (stacked mappings), in which case only the fused name is left.
+        if any(prefix in module_name for module_name in unquantized_modules):
+            return True
         is_skipped = None
         for shard_prefix in shard_prefixes:
             is_shard_skipped = any(

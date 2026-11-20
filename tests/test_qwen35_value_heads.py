@@ -73,9 +73,7 @@ def test_ratio_one_registers_no_layout():
 def test_ratio_one_declares_no_linear_layouts():
     cfg = _Cfg(nk=4, nv=4, hv=1)
     name_map = {"blk.0.ssm_out.weight": "model.layers.0.linear_attn.out_proj.weight"}
-    layouts = Qwen35GGUFAdapter().get_linear_layouts(
-        None, _ModelConfig(cfg), name_map
-    )
+    layouts = Qwen35GGUFAdapter().get_linear_layouts(None, _ModelConfig(cfg), name_map)
     assert layouts == {}
 
 
@@ -85,9 +83,7 @@ def test_out_proj_gets_a_layout_so_activations_are_reordered():
     nk, ratio, hv = 4, 3, 128
     cfg = _Cfg(nk=nk, nv=nk * ratio, hv=hv)
     name_map = {"blk.0.ssm_out.weight": "model.layers.0.linear_attn.out_proj.weight"}
-    layouts = Qwen35GGUFAdapter().get_linear_layouts(
-        None, _ModelConfig(cfg), name_map
-    )
+    layouts = Qwen35GGUFAdapter().get_linear_layouts(None, _ModelConfig(cfg), name_map)
     assert layouts == {
         "model.layers.0.linear_attn.out_proj": GGUFHeadTilingLayout(
             heads_per_group=ratio, head_dim=hv

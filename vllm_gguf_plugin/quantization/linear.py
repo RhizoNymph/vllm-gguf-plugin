@@ -33,7 +33,6 @@ from .utils import (
     UNQUANTIZED_TYPES,
 )
 
-
 # Batch size at or above which the fused MMQ kernel loses to
 # dequantize-then-cuBLAS, so prefill-shaped GEMMs take the dequant path instead.
 #
@@ -74,11 +73,7 @@ def _dequant_gemm(
 
 def _prefer_dequant_gemm(x: torch.Tensor, weight_type: int) -> bool:
     """True when this GEMM is large enough that MMQ is the slower choice."""
-    return (
-        _MMQ_SAFE > 0
-        and x.shape[0] >= _MMQ_SAFE
-        and weight_type in DEQUANT_TYPES
-    )
+    return _MMQ_SAFE > 0 and x.shape[0] >= _MMQ_SAFE and weight_type in DEQUANT_TYPES
 
 
 def _fused_mul_mat_gguf(

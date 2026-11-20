@@ -56,8 +56,6 @@ def test_gemma4_mapping_keeps_plugin_only_keys():
     vllm_gguf_plugin.register()
     mapping = ggml.GGUF_CONFIG_MAPPING["gemma4"]
     assert mapping["attention.shared_kv_layers"] == "num_kv_shared_layers"
-    assert (
-        mapping["embedding_length_per_layer_input"] == "hidden_size_per_layer_input"
-    )
+    assert mapping["embedding_length_per_layer_input"] == "hidden_size_per_layer_input"
     # Deliberately unmapped: applying it saturates gemma4 logits.
     assert "final_logit_softcapping" not in mapping

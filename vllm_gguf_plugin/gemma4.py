@@ -30,8 +30,8 @@ _TOKENIZER_PATCHED = False
 def _patch_gemma4_config() -> None:
     """Teach transformers' GGUF loader about the gemma4 architecture.
 
-    Merges keys into ``GGUF_CONFIG_MAPPING`` in-place and wraps ``load_gguf_checkpoint``
-    to:
+    Merges keys into ``GGUF_CONFIG_MAPPING`` in-place and wraps
+    ``load_gguf_checkpoint`` to:
       * rename model_type "gemma4" -> "gemma4_text" (mirrors the gemma3 path)
       * reduce per-layer head_count_kv lists into the scalar fields that
         Gemma4TextConfig expects (num_key_value_heads for sliding layers,
@@ -89,23 +89,21 @@ def _patch_gemma4_config() -> None:
         reader = gguf.GGUFReader(gguf_path)
         fields = reader.fields
         tensor_names = {t.name for t in reader.tensors}
-        if not any("per_layer" in name or "layer_input" in name for name in tensor_names):
+        if not any(
+            "per_layer" in name or "layer_input" in name for name in tensor_names
+        ):
             cfg["hidden_size_per_layer_input"] = 0
             cfg["vocab_size_per_layer_input"] = 0
         pat_field = fields.get("gemma4.attention.sliding_window_pattern")
         nkv_field = fields.get("gemma4.attention.head_count_kv")
         layer_pat = None
         if pat_field is not None:
-            layer_pat = [
-                bool(pat_field.parts[i].tolist()[0]) for i in pat_field.data
-            ]
+            layer_pat = [bool(pat_field.parts[i].tolist()[0]) for i in pat_field.data]
             cfg["layer_types"] = [
                 "sliding_attention" if p else "full_attention" for p in layer_pat
             ]
         if nkv_field is not None:
-            nkv_list = [
-                int(nkv_field.parts[i].tolist()[0]) for i in nkv_field.data
-            ]
+            nkv_list = [int(nkv_field.parts[i].tolist()[0]) for i in nkv_field.data]
             if layer_pat is not None and len(layer_pat) == len(nkv_list):
                 sliding = {v for v, p in zip(nkv_list, layer_pat) if p}
                 full = {v for v, p in zip(nkv_list, layer_pat) if not p}
@@ -120,9 +118,7 @@ def _patch_gemma4_config() -> None:
         if key_swa is not None:
             cfg["head_dim"] = int(key_swa.parts[key_swa.data[0]].tolist()[0])
         if key_full is not None:
-            cfg["global_head_dim"] = int(
-                key_full.parts[key_full.data[0]].tolist()[0]
-            )
+            cfg["global_head_dim"] = int(key_full.parts[key_full.data[0]].tolist()[0])
         # Detect attention_k_eq_v: if any full-attention block is missing
         # an attn_v tensor, the checkpoint uses shared K/V weights for
         # full-attention layers.
@@ -139,9 +135,7 @@ def _patch_gemma4_config() -> None:
         if rope_swa is not None:
             rope_parameters["sliding_attention"] = {
                 "rope_type": "default",
-                "rope_theta": float(
-                    rope_swa.parts[rope_swa.data[0]].tolist()[0]
-                ),
+                "rope_theta": float(rope_swa.parts[rope_swa.data[0]].tolist()[0]),
             }
         if rope_full is not None:
             # Verified against the GGUF's rope_freqs.weight: only the first
@@ -150,9 +144,7 @@ def _patch_gemma4_config() -> None:
             rope_parameters["full_attention"] = {
                 "rope_type": "proportional",
                 "partial_rotary_factor": 0.25,
-                "rope_theta": float(
-                    rope_full.parts[rope_full.data[0]].tolist()[0]
-                ),
+                "rope_theta": float(rope_full.parts[rope_full.data[0]].tolist()[0]),
             }
         if rope_parameters:
             cfg["rope_parameters"] = rope_parameters
@@ -263,14 +255,10 @@ def _patch_gemma4_tokenizer() -> None:
                 if is_gemma4:
                     bos_field = reader.fields.get("tokenizer.ggml.bos_token_id")
                     if bos_field is not None:
-                        gguf_bos = int(
-                            bos_field.parts[bos_field.data[0]].tolist()[0]
-                        )
+                        gguf_bos = int(bos_field.parts[bos_field.data[0]].tolist()[0])
                     eos_field = reader.fields.get("tokenizer.ggml.eos_token_id")
                     if eos_field is not None:
-                        gguf_eos = int(
-                            eos_field.parts[eos_field.data[0]].tolist()[0]
-                        )
+                        gguf_eos = int(eos_field.parts[eos_field.data[0]].tolist()[0])
             except Exception as exc:
                 logger.debug("gguf BOS/EOS probe failed for %s: %s", gguf_path, exc)
 
@@ -319,9 +307,7 @@ def _patch_gemma4_tokenizer() -> None:
                     )
                 )
             except Exception as exc:
-                logger.debug(
-                    "failed to override post_processor for BOS: %s", exc
-                )
+                logger.debug("failed to override post_processor for BOS: %s", exc)
 
         if is_gemma4 and gguf_eos is not None:
             # The GGUF tokenizer converter defaults eos to a generic token

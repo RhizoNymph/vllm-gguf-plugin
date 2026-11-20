@@ -2,6 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Gemma4 GGUF support.
 
+transformers maps gemma4 GGUF metadata natively, but its mapping omits the
+shared-KV and per-layer-input keys and its raw result needs gemma4-specific
+reshaping (per-layer KV head lists, layer types, rope parameters, head dims).
+``_patch_gemma4_config`` merges the missing keys and wraps
+``load_gguf_checkpoint`` to do that reshaping; ``_patch_gemma4_tokenizer``
+wraps ``AutoTokenizer.from_pretrained`` for every GGUF architecture. Both are
+idempotent monkeypatches installed from ``plugin.register()``.
+"""Gemma4 GGUF support.
+
 Transformers ships ``GGUF_CONFIG_MAPPING`` with entries for gemma2/gemma3
 but not gemma4, so ``load_gguf_checkpoint`` raises before vLLM ever sees a
 gemma4 GGUF. The ``gguf`` library *does* know the ``gemma4`` architecture, so
@@ -9,6 +18,15 @@ once the config is parsed the default weights adapter maps tensors correctly
 (see ``weights_adapter/transformers.py``). This module teaches transformers about
 gemma4 at the config and tokenizer level via two idempotent monkeypatches that
 are installed from ``plugin.register()``.
+"""Gemma4 GGUF support.
+
+transformers maps gemma4 GGUF metadata natively, but its mapping omits the
+shared-KV and per-layer-input keys and its raw result needs gemma4-specific
+reshaping (per-layer KV head lists, layer types, rope parameters, head dims).
+``_patch_gemma4_config`` merges the missing keys and wraps
+``load_gguf_checkpoint`` to do that reshaping; ``_patch_gemma4_tokenizer``
+wraps ``AutoTokenizer.from_pretrained`` for every GGUF architecture. Both are
+idempotent monkeypatches installed from ``plugin.register()``.
 """
 
 from pathlib import Path
@@ -28,7 +46,16 @@ _TOKENIZER_PATCHED = False
 
 
 def _patch_gemma4_config() -> None:
-    """Teach transformers' GGUF loader about the gemma4 architecture.
+    """Gemma4 GGUF support.
+
+transformers maps gemma4 GGUF metadata natively, but its mapping omits the
+shared-KV and per-layer-input keys and its raw result needs gemma4-specific
+reshaping (per-layer KV head lists, layer types, rope parameters, head dims).
+``_patch_gemma4_config`` merges the missing keys and wraps
+``load_gguf_checkpoint`` to do that reshaping; ``_patch_gemma4_tokenizer``
+wraps ``AutoTokenizer.from_pretrained`` for every GGUF architecture. Both are
+idempotent monkeypatches installed from ``plugin.register()``.
+"""Teach transformers' GGUF loader about the gemma4 architecture.
 
     Patches ``GGUF_CONFIG_MAPPING`` in-place and wraps ``load_gguf_checkpoint``
     to:
@@ -39,7 +66,16 @@ def _patch_gemma4_config() -> None:
       * derive layer_types from attention.sliding_window_pattern
       * build rope_parameters from rope.freq_base{,_swa}
       * split key_length{,_swa} into head_dim / global_head_dim
-    """
+    """Gemma4 GGUF support.
+
+transformers maps gemma4 GGUF metadata natively, but its mapping omits the
+shared-KV and per-layer-input keys and its raw result needs gemma4-specific
+reshaping (per-layer KV head lists, layer types, rope parameters, head dims).
+``_patch_gemma4_config`` merges the missing keys and wraps
+``load_gguf_checkpoint`` to do that reshaping; ``_patch_gemma4_tokenizer``
+wraps ``AutoTokenizer.from_pretrained`` for every GGUF architecture. Both are
+idempotent monkeypatches installed from ``plugin.register()``.
+"""
     from transformers import modeling_gguf_pytorch_utils as _mgu
     from transformers.integrations import ggml as _ggml
 
@@ -47,34 +83,33 @@ def _patch_gemma4_config() -> None:
     if _CONFIG_PATCHED:
         return
 
-    _ggml.GGUF_CONFIG_MAPPING.setdefault(
-        "gemma4",
-        {
-            "context_length": "max_position_embeddings",
-            "block_count": "num_hidden_layers",
-            "feed_forward_length": "intermediate_size",
-            "embedding_length": "hidden_size",
-            "rope.dimension_count": None,
-            "attention.head_count": "num_attention_heads",
-            "attention.layer_norm_rms_epsilon": "rms_norm_eps",
-            "attention.sliding_window": "sliding_window",
-            "attention.shared_kv_layers": "num_kv_shared_layers",
-            # NOTE: final_logit_softcapping intentionally not mapped. llama.cpp's
-            # gemma4 GGUFs carry a value of 30.0 inherited from gemma2/3, but
-            # the HF Gemma4TextConfig defaults to None and applying it here
-            # saturates all token logits to ±30 (hidden state RMS is large), so
-            # softmax collapses to ~uniform. Leave it unset.
-            "embedding_length_per_layer_input": "hidden_size_per_layer_input",
-            "vocab_size": "vocab_size",
-        },
-    )
+    # transformers maps gemma4 natively (5.18+), but without the shared-KV and
+    # per-layer-input keys. Merge ours in key by key: a whole-entry setdefault
+    # would silently drop them whenever a native entry exists.
+    mapping = _ggml.GGUF_CONFIG_MAPPING.setdefault("gemma4", {})
+    for gguf_key, hf_key in {
+        "context_length": "max_position_embeddings",
+        "block_count": "num_hidden_layers",
+        "feed_forward_length": "intermediate_size",
+        "embedding_length": "hidden_size",
+        "rope.dimension_count": None,
+        "attention.head_count": "num_attention_heads",
+        "attention.layer_norm_rms_epsilon": "rms_norm_eps",
+        "attention.sliding_window": "sliding_window",
+        "attention.shared_kv_layers": "num_kv_shared_layers",
+        # NOTE: final_logit_softcapping intentionally not mapped. llama.cpp's
+        # gemma4 GGUFs carry a value of 30.0 inherited from gemma2/3, but
+        # the HF Gemma4TextConfig defaults to None and applying it here
+        # saturates all token logits to ±30 (hidden state RMS is large), so
+        # softmax collapses to ~uniform. Leave it unset.
+        "embedding_length_per_layer_input": "hidden_size_per_layer_input",
+        "vocab_size": "vocab_size",
+    }.items():
+        mapping.setdefault(gguf_key, hf_key)
     if "gemma4" not in _mgu.GGUF_SUPPORTED_ARCHITECTURES:
         _mgu.GGUF_SUPPORTED_ARCHITECTURES.append("gemma4")
-    # convert_gguf_tokenizer keys by the raw GGUF architecture string
-    # ("gemma4"), while elsewhere we use the renamed model_type
-    # ("gemma4_text"). Register both so either lookup path works.
-    _ggml.GGUF_TO_FAST_CONVERTERS["gemma4"] = _ggml.GGUFGemmaConverter
-    _ggml.GGUF_TO_FAST_CONVERTERS["gemma4_text"] = _ggml.GGUFGemmaConverter
+    # The tokenizer needs nothing here: since transformers 5.18 GGUF tokenizers
+    # are built from ``tokenizer.ggml.model`` alone, which covers gemma4.
 
     _orig_load = _mgu.load_gguf_checkpoint
 
@@ -160,21 +195,24 @@ def _patch_gemma4_config() -> None:
         cfg.pop("rope_theta", None)
         return parsed
 
+    # configuration_utils and tokenization_auto import load_gguf_checkpoint
+    # from this module at call time, so patching the module attribute reaches
+    # both the config and the tokenizer paths.
     _mgu.load_gguf_checkpoint = _patched_load
-    # transformers.configuration_utils imports the function by name at module
-    # load, so patching the source module alone misses the path that
-    # PretrainedConfig.get_config_dict actually invokes.
-    from transformers import configuration_utils as _cu
-
-    _cu.load_gguf_checkpoint = _patched_load
-    from transformers.models.auto import tokenization_auto as _ta
-
-    _ta.load_gguf_checkpoint = _patched_load
     _CONFIG_PATCHED = True
 
 
 def _patch_gemma4_tokenizer() -> None:
-    """Wrap ``AutoTokenizer.from_pretrained`` to repair GGUF tokenizers.
+    """Gemma4 GGUF support.
+
+transformers maps gemma4 GGUF metadata natively, but its mapping omits the
+shared-KV and per-layer-input keys and its raw result needs gemma4-specific
+reshaping (per-layer KV head lists, layer types, rope parameters, head dims).
+``_patch_gemma4_config`` merges the missing keys and wraps
+``load_gguf_checkpoint`` to do that reshaping; ``_patch_gemma4_tokenizer``
+wraps ``AutoTokenizer.from_pretrained`` for every GGUF architecture. Both are
+idempotent monkeypatches installed from ``plugin.register()``.
+"""Wrap ``AutoTokenizer.from_pretrained`` to repair GGUF tokenizers.
 
     Two fixes ride on this one hook, because it is the only point where the
     plugin sees the tokenizer between construction and use.
@@ -194,7 +232,16 @@ def _patch_gemma4_tokenizer() -> None:
     re-register the CONTROL/USER_DEFINED tokens the converters drop from the
     added-token vocabulary. See ``vllm_gguf_plugin.tokenizer`` and
     docs/features/tokenizer_added_tokens.md.
-    """
+    """Gemma4 GGUF support.
+
+transformers maps gemma4 GGUF metadata natively, but its mapping omits the
+shared-KV and per-layer-input keys and its raw result needs gemma4-specific
+reshaping (per-layer KV head lists, layer types, rope parameters, head dims).
+``_patch_gemma4_config`` merges the missing keys and wraps
+``load_gguf_checkpoint`` to do that reshaping; ``_patch_gemma4_tokenizer``
+wraps ``AutoTokenizer.from_pretrained`` for every GGUF architecture. Both are
+idempotent monkeypatches installed from ``plugin.register()``.
+"""
     global _TOKENIZER_PATCHED
     if _TOKENIZER_PATCHED:
         return
@@ -349,6 +396,24 @@ def _patch_gemma4_tokenizer() -> None:
 
 
 def register_gemma4_gguf_support() -> None:
-    """Install gemma4 GGUF config + tokenizer patches (idempotent)."""
+    """Gemma4 GGUF support.
+
+transformers maps gemma4 GGUF metadata natively, but its mapping omits the
+shared-KV and per-layer-input keys and its raw result needs gemma4-specific
+reshaping (per-layer KV head lists, layer types, rope parameters, head dims).
+``_patch_gemma4_config`` merges the missing keys and wraps
+``load_gguf_checkpoint`` to do that reshaping; ``_patch_gemma4_tokenizer``
+wraps ``AutoTokenizer.from_pretrained`` for every GGUF architecture. Both are
+idempotent monkeypatches installed from ``plugin.register()``.
+"""Install gemma4 GGUF config + tokenizer patches (idempotent)."""Gemma4 GGUF support.
+
+transformers maps gemma4 GGUF metadata natively, but its mapping omits the
+shared-KV and per-layer-input keys and its raw result needs gemma4-specific
+reshaping (per-layer KV head lists, layer types, rope parameters, head dims).
+``_patch_gemma4_config`` merges the missing keys and wraps
+``load_gguf_checkpoint`` to do that reshaping; ``_patch_gemma4_tokenizer``
+wraps ``AutoTokenizer.from_pretrained`` for every GGUF architecture. Both are
+idempotent monkeypatches installed from ``plugin.register()``.
+"""
     _patch_gemma4_config()
     _patch_gemma4_tokenizer()

@@ -27,7 +27,7 @@ Types 3 and 4 are what HF keeps in `added_tokens_decoder`. An added token is
 matched as a literal string ahead of BPE, so it always encodes to exactly one
 id.
 
-transformers' GGUF converters largely ignore that array:
+Before transformers 5.18 the GGUF converters largely ignored that array:
 
 | Converter | Used for | Added tokens registered |
 |---|---|---|
@@ -36,10 +36,14 @@ transformers' GGUF converters largely ignore that array:
 | `GGUFGemmaConverter` | gemma, **gemma4** | none |
 | `GGUFGPTConverter` | gpt2 | none |
 
-The two converters this plugin routes to — `GGUFQwen2Converter` via
-`qwen35.py`, `GGUFGemmaConverter` via `gemma4.py` — never read `token_type`
-at all. Qwen2 hardcodes `<|endoftext|>`, `<|im_start|>`, `<|im_end|>`; Gemma
-adds nothing.
+transformers 5.18 replaced those converters with builders keyed on
+`tokenizer.ggml.model` (`integrations/gguf/gguf_tokenizer_mapping.py`), whose
+`add_gguf_special_tokens` registers CONTROL as special and USER_DEFINED as
+plain added tokens, and whose `get_gguf_tokenizer` names bos/eos from the
+GGUF ids. The plugin's repair still runs after construction: it only
+registers tokens at ids the tokenizer already resolves them to, so on the
+pinned transformers it is expected to register nothing, and it keeps future
+converter regressions from reaching `encode()` silently.
 
 ## Why it fails silently
 

@@ -42,20 +42,13 @@ Crucially, **vLLM inspects the model class in a subprocess**
 property of the class on disk; monkey-patching `is_hybrid` in the parent
 process has no effect.
 
-`qwen35.py` registers the text-only entry points:
-
-```python
-ModelRegistry.register_model(
-    "Qwen3_5ForCausalLM", "vllm.model_executor.models.qwen3_5:Qwen3_5ForCausalLM"
-)
-```
-
-so those classes must themselves carry `IsHybrid` and expose the mamba state
-calculators. In this fork they inherit `Qwen3_5HybridStateMixin`, which bundles
-the marker with `get_mamba_state_shape_from_config`,
-`get_mamba_state_dtype_from_config`, and `get_mamba_state_copy_func` — a class
-cannot advertise hybridness without supplying the shapes needed to size its
-cache.
+vLLM registers the text-only entry points itself (`Qwen3_5ForCausalLM`,
+`Qwen3_5MoeForCausalLM` → `vllm.models.qwen3_5`, which dispatches to the
+per-platform implementation), and those classes carry `IsHybrid` and the mamba
+state calculators natively. The plugin must **not** re-register them: an
+earlier `qwen35.py` pointed both names at
+`vllm.model_executor.models.qwen3_5`, which on current vLLM is the non-CUDA
+fallback, so it silently swapped the CUDA model for the generic one.
 
 ## Value conventions ggml does not share with HF
 
@@ -137,10 +130,12 @@ describe the model accurately; sizing the cache is vLLM's.
 
 | File | Role |
 |---|---|
-| `vllm_gguf_plugin/qwen35.py` | GGUF→HF config mapping for `qwen35`/`qwen35moe`; registers the text-only model classes; derives `linear_*_heads` fields ggml stores implicitly |
+| transformers `integrations/gguf/gguf_config_mapping.py` | GGUF→HF config for `qwen35`/`qwen35moe` (native since 5.18): `qwen3_5{,_moe}_text`, decoder layer count excluding MTP blocks, per-head `linear_value_head_dim` |
 | `vllm_gguf_plugin/plugin.py` | `create_model_config` patch — must leave `mamba_block_size` unset |
 | `tests/test_plugin.py` | `test_register_leaves_qwen35_mamba_block_size_unset` |
 
-Requires the companion vLLM change adding `Qwen3_5HybridStateMixin` to
-`vllm/model_executor/models/qwen3_5.py` and the `Qwen3_5*ForCausalLM` entries
-in `MODELS_CONFIG_MAP`.
+| `tests/test_transformers_compat.py` | the plugin leaves vLLM's Qwen3.5 registrations and the native qwen35 GGUF config path alone |
+
+Requires transformers >= 5.18 (native qwen35 GGUF config) and a vLLM whose
+registry carries `Qwen3_5*ForCausalLM` and `MODELS_CONFIG_MAP` entries for
+them (upstream main as of 2026-11).

@@ -27,7 +27,6 @@ from .gguf_utils import (
 )
 from .loader import GGUFModelLoader
 from .quantization import DiffusionGGUFConfig, GGUFConfig
-from .qwen35 import register_qwen35_gguf_support
 from .weight_utils import download_gguf, resolve_local_gguf
 from .weights_adapter.diffusion.integration import _patch_diffusers_loader
 
@@ -243,5 +242,4 @@ def register() -> None:
     _patch_engine_args()
     _patch_speculator_probe()
     register_gemma4_gguf_support()
-    register_qwen35_gguf_support()
     _patch_diffusers_loader()

@@ -30,10 +30,11 @@ Overview:
       a local file, a directory containing one, a "dir:QUANT" spec, or a remote
       "repo:QUANT" that is downloaded. See docs/features/model_resolution.md.
     config_synthesis: >
-      GGUFConfigParser + the per-architecture shims (gemma4.py, qwen35.py)
-      translate GGUF metadata keys into an HF config dict, mapping the ggml
-      architecture name onto a vLLM architecture and filling fields that ggml
-      stores implicitly.
+      GGUFConfigParser hands pure-GGUF sources to transformers (>= 5.18), which
+      builds the config from GGUF metadata natively for qwen35/qwen35moe;
+      gemma4.py wraps transformers' load_gguf_checkpoint for gemma4 and merges
+      the mapping keys transformers lacks. Adapters then map the model_type
+      onto a vLLM architecture and fill fields ggml stores implicitly.
     tokenizer_synthesis: >
       A patched AutoTokenizer.from_pretrained (in gemma4.py) restates the
       GGUF reference in the (dir, gguf_file) form transformers needs, then
@@ -70,7 +71,7 @@ Features Index:
     description: >
       Serving hybrid attention/recurrent GGUF models (Qwen3.5 gated-delta-net),
       where cache geometry depends on vLLM recognising the model as hybrid.
-    entry_points: [vllm_gguf_plugin.qwen35.register_qwen35_gguf_support]
+    entry_points: [vllm_gguf_plugin.weights_adapter.qwen3_5.Qwen35GGUFAdapter]
     depends_on: [model_resolution]
     doc: docs/features/hybrid_models.md
   tokenizer_added_tokens:

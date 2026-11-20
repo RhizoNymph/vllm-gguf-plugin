@@ -10,11 +10,11 @@ CONTROL (3) and USER_DEFINED (4) are the two kinds HF keeps in
 ``added_tokens_decoder``: strings matched verbatim, ahead of BPE, so they
 always encode to one id.
 
-transformers largely ignores that array. ``GGUFLlamaConverter`` reads it but
-only honours CONTROL; the converters this plugin routes through —
-``GGUFQwen2Converter`` for qwen35/qwen35moe, ``GGUFGemmaConverter`` for
-gemma4 — never consult it at all. Qwen2 hard-codes three ChatML strings and
-Gemma adds none, so everything else falls through to BPE.
+transformers before 5.18 largely ignored that array: ``GGUFLlamaConverter``
+read it but only honoured CONTROL, and ``GGUFQwen2Converter`` /
+``GGUFGemmaConverter`` never consulted it, so everything else fell through to
+BPE. 5.18's ``add_gguf_special_tokens`` handles both types; the repair here
+then registers nothing, and remains as a guard against converter regressions.
 
 The dropped tokens are still in the BPE vocab, which is what makes this so
 quiet: ``convert_ids_to_tokens`` and ``decode`` behave, and only ``encode``

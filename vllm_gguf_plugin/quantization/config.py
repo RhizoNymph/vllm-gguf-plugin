@@ -36,6 +36,8 @@ class GGUFConfig(QuantizationConfig):
         super().__init__()
         self.unquantized_modules = unquantized_modules or []
         self.linear_layouts: dict[str, GGUFLinearLayout] = {}
+        # ggml type of a Qwen4Exp PLE n-gram table, set by the loader.
+        self.ple_weight_type: int | None = None
 
     def __repr__(self) -> str:
         return "GGUFConfig()"

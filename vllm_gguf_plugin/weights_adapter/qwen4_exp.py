@@ -37,6 +37,8 @@ if TYPE_CHECKING:
     from transformers import PretrainedConfig
     from vllm.config import ModelConfig
 
+    from ..quantization import GGUFConfig
+
 logger = init_logger(__name__)
 
 QWEN4EXP_ARCHITECTURES = {
@@ -467,10 +469,17 @@ class Qwen4ExpGGUFAdapter(Qwen35GGUFAdapter):
             self._qwen4exp_weights(weights, model_config), model_config
         )
 
-    def get_ple_weight_type(self, files: GGUFModelFiles) -> int | None:
-        """ggml type of the PLE table, or None when the model has none."""
+    def configure_quant_config(
+        self,
+        files: GGUFModelFiles,
+        quant_config: GGUFConfig,
+    ) -> None:
+        """Keep the PLE table packed in its GGUF type (see ple_embedding.py)."""
+        from ..quantization.ple_embedding import install_qwen4exp_ple_support
+
         for gguf_file in files.backbone:
             for tensor in gguf.GGUFReader(gguf_file).tensors:
                 if tensor.name == "per_layer_token_embd.weight":
-                    return int(tensor.tensor_type)
-        return None
+                    quant_config.ple_weight_type = int(tensor.tensor_type)
+                    install_qwen4exp_ple_support()
+                    return

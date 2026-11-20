@@ -212,6 +212,7 @@ class GGUFModelLoader(BaseModelLoader):
             plan.linear_layouts,
             prefix=prefix,
         )
+        adapter.configure_quant_config(plan.files, vllm_config.quant_config)
 
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):

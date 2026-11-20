@@ -4,6 +4,7 @@ import glob
 import itertools
 import os
 import re
+import warnings
 from collections.abc import Generator, Iterable
 from pathlib import Path
 
@@ -160,6 +161,22 @@ def get_gguf_tensor_names(gguf_files: Iterable[str]) -> set[str]:
     }
 
 
+# Tensors at least this large are yielded as views of the file mapping rather
+# than copied: Qwen4Exp's PLE table alone is 28.8 GB packed.
+_ZERO_COPY_MIN_BYTES = 4 << 30
+
+
+def _mapped_view(weight: np.ndarray) -> torch.Tensor:
+    """A tensor over a read-only GGUF mapping, without copying it.
+
+    Consumers must not write to it in place; slicing and copying out are fine.
+    """
+    with warnings.catch_warnings():
+        # torch warns that it cannot mark the tensor read-only.
+        warnings.filterwarnings("ignore", message=".*not writable.*")
+        return torch.from_numpy(weight)
+
+
 def weight_type_name(name: str) -> str:
     """Name of the weight-type companion of quantized tensor *name*.
 
@@ -224,6 +241,8 @@ def gguf_quant_weights_iterator_multi(
                 if reader.byte_order == "S":
                     weight = weight.byteswap()
                 param = torch.tensor(weight).view(torch.bfloat16)
+            elif weight.nbytes >= _ZERO_COPY_MIN_BYTES:
+                param = _mapped_view(weight)
             else:
                 param = torch.tensor(weight)
             yield name, param

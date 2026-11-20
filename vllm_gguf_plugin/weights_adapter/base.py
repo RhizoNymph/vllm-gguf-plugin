@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from transformers import PretrainedConfig
     from vllm.config import ModelConfig
 
+    from ..quantization import GGUFConfig
     from ..quantization.layout import GGUFLinearLayout
 
 
@@ -65,6 +66,15 @@ class BaseGGUFWeightsAdapter(ABC):
         """Describe layouts required by GGUF linear weights."""
         del files, model_config, name_map
         return {}
+
+    def configure_quant_config(
+        self,
+        files: GGUFModelFiles,
+        quant_config: GGUFConfig,
+    ) -> None:
+        """Record per-model storage decisions on the quant config before the
+        model is built."""
+        del files, quant_config
 
     def transform_weights(
         self,

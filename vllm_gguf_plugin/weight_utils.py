@@ -157,6 +157,22 @@ def get_gguf_tensor_names(gguf_files: Iterable[str]) -> set[str]:
     }
 
 
+def weight_type_name(name: str) -> str:
+    """Name of the weight-type companion of quantized tensor *name*.
+
+    Only the last ``weight`` is renamed: module names may contain the word
+    too (``input_mix_weight_down.weight``), and renaming every occurrence
+    produces a name no parameter has.
+    """
+    head, sep, tail = name.rpartition("weight")
+    if not sep:
+        raise ValueError(
+            f"Quantized GGUF tensor mapped to {name!r}, which has no 'weight' "
+            "component to carry its weight type"
+        )
+    return f"{head}weight_type{tail}"
+
+
 def gguf_quant_weights_iterator(
     gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str] | None
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
@@ -188,7 +204,7 @@ def gguf_quant_weights_iterator_multi(
 
             weight_type = tensor.tensor_type
             if weight_type.name not in _QUANT_TYPES:
-                yield name.replace("weight", "weight_type"), torch.tensor(weight_type)
+                yield weight_type_name(name), torch.tensor(weight_type)
 
             weight = tensor.data
             if weight_type.name == "BF16" and weight.dtype == np.uint8:

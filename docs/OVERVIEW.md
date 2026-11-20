@@ -45,7 +45,10 @@ Overview:
     weight_loading: >
       GGUFModelLoader plus weights_adapter/* map ggml tensor names onto vLLM
       parameter names, handling per-architecture fusions (qkv, gate_up) and
-      multimodal/mmproj sidecars.
+      multimodal/mmproj sidecars. gguf_compat.py teaches gguf-py the ggml
+      types it predates (Q1_0/Q2_0/F8_E4M3) and transcodes Q2_0 to Q4_0;
+      adapters can record storage decisions on the quant config before the
+      model is built (configure_quant_config).
     quantization: >
       quantization/* implements the GGUF quantization backend (linear, MoE,
       embeddings) over ggml block layouts; triton/ and csrc/ hold the
@@ -86,6 +89,19 @@ Features Index:
       - vllm_gguf_plugin.tokenizer.gguf_special_token_kwargs
     depends_on: [model_resolution]
     doc: docs/features/tokenizer_added_tokens.md
+  qwen4exp:
+    description: >
+      Serving unsloth's Qwen3.8-Flash-Next GGUF (ggml qwen4exp) on vLLM's
+      Qwen4Exp: config from the HF repo validated against GGUF metadata,
+      hyper-connection / QSA indexer / PLE mapping, the PLE n-gram table kept
+      packed in its GGUF type, the mmproj vision tower, and ggml Q2_0 served
+      as exact Q4_0.
+    entry_points:
+      - vllm_gguf_plugin.weights_adapter.qwen4_exp.Qwen4ExpGGUFAdapter
+      - vllm_gguf_plugin.quantization.ple_embedding.install_qwen4exp_ple_support
+      - vllm_gguf_plugin.gguf_compat.ensure_new_ggml_types
+    depends_on: [model_resolution, hybrid_models]
+    doc: docs/features/qwen4exp.md
 ```
 
 ## Invariants

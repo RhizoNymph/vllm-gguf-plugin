@@ -3,9 +3,9 @@
 from pathlib import Path
 
 import gguf
-
 from transformers import PretrainedConfig
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+from vllm.logger import init_logger
 from vllm.transformers_utils.config import HFConfigParser
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
 
@@ -41,13 +41,21 @@ def _find_local_gguf_file(model: str | Path) -> str | None:
     return None
 
 
+logger = init_logger(__name__)
+
 # GGUF architectures whose config cannot be rebuilt from metadata: the file
 # omits fields the vLLM model needs, so the HF repo has to supply it.
 _CONFIG_REPOS = {"qwen4exp": "Qwen/Qwen3.8-Flash-Next"}
 
 
 def _reject_config_from_metadata_only(gguf_file: str) -> None:
-    reader = gguf.GGUFReader(gguf_file)
+    try:
+        reader = gguf.GGUFReader(gguf_file)
+    except (ValueError, IndexError, OSError) as exc:
+        # Not a readable GGUF: leave the diagnosis to transformers' parser,
+        # which reports the file it could not read.
+        logger.debug("Could not read GGUF metadata of %s: %s", gguf_file, exc)
+        return
     field = reader.fields.get("general.architecture")
     architecture = field.contents() if field is not None else None
     repo = _CONFIG_REPOS.get(architecture)

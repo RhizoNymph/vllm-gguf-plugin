@@ -1,0 +1,673 @@
+{
+ "lm_head.weight": [
+  "BF16",
+  [
+   248320,
+   2560
+  ]
+ ],
+ "model.language_model.embed_tokens.weight": [
+  "BF16",
+  [
+   248320,
+   2560
+  ]
+ ],
+ "model.language_model.hyper_connection_mixer.hc_norm.weight": [
+  "BF16",
+  [
+   10240
+  ]
+ ],
+ "model.language_model.hyper_connection_mixer.input_mix_weight_down.weight": [
+  "BF16",
+  [
+   320,
+   10240
+  ]
+ ],
+ "model.language_model.hyper_connection_mixer.input_mix_weight_up.weight": [
+  "BF16",
+  [
+   10240,
+   320
+  ]
+ ],
+ "model.language_model.layers.N.attn_hyper_connection.block_inject_weight.weight": [
+  "BF16",
+  [
+   4,
+   10240
+  ]
+ ],
+ "model.language_model.layers.N.attn_hyper_connection.hc_norm.weight": [
+  "BF16",
+  [
+   10240
+  ]
+ ],
+ "model.language_model.layers.N.attn_hyper_connection.input_mix_weight_down.weight": [
+  "BF16",
+  [
+   320,
+   10240
+  ]
+ ],
+ "model.language_model.layers.N.attn_hyper_connection.input_mix_weight_up.weight": [
+  "BF16",
+  [
+   10240,
+   320
+  ]
+ ],
+ "model.language_model.layers.N.linear_attn.A_log": [
+  "BF16",
+  [
+   48
+  ]
+ ],
+ "model.language_model.layers.N.linear_attn.conv1d.weight": [
+  "BF16",
+  [
+   10240,
+   1,
+   4
+  ]
+ ],
+ "model.language_model.layers.N.linear_attn.dt_bias": [
+  "BF16",
+  [
+   48
+  ]
+ ],
+ "model.language_model.layers.N.linear_attn.in_proj_a.weight": [
+  "BF16",
+  [
+   48,
+   2560
+  ]
+ ],
+ "model.language_model.layers.N.linear_attn.in_proj_b.weight": [
+  "BF16",
+  [
+   48,
+   2560
+  ]
+ ],
+ "model.language_model.layers.N.linear_attn.in_proj_qkv.weight": [
+  "BF16",
+  [
+   10240,
+   2560
+  ]
+ ],
+ "model.language_model.layers.N.linear_attn.in_proj_z.weight": [
+  "BF16",
+  [
+   6144,
+   2560
+  ]
+ ],
+ "model.language_model.layers.N.linear_attn.norm.weight": [
+  "BF16",
+  [
+   128
+  ]
+ ],
+ "model.language_model.layers.N.linear_attn.out_proj.weight": [
+  "BF16",
+  [
+   2560,
+   6144
+  ]
+ ],
+ "model.language_model.layers.N.mlp.experts.down_proj": [
+  "BF16",
+  [
+   512,
+   2560,
+   640
+  ]
+ ],
+ "model.language_model.layers.N.mlp.experts.gate_up_proj": [
+  "BF16",
+  [
+   512,
+   1280,
+   2560
+  ]
+ ],
+ "model.language_model.layers.N.mlp.gate.weight": [
+  "BF16",
+  [
+   512,
+   2560
+  ]
+ ],
+ "model.language_model.layers.N.mlp.shared_expert.down_proj.weight": [
+  "BF16",
+  [
+   2560,
+   640
+  ]
+ ],
+ "model.language_model.layers.N.mlp.shared_expert.gate_proj.weight": [
+  "BF16",
+  [
+   640,
+   2560
+  ]
+ ],
+ "model.language_model.layers.N.mlp.shared_expert.up_proj.weight": [
+  "BF16",
+  [
+   640,
+   2560
+  ]
+ ],
+ "model.language_model.layers.N.mlp.shared_expert_gate.weight": [
+  "BF16",
+  [
+   1,
+   2560
+  ]
+ ],
+ "model.language_model.layers.N.mlp_hyper_connection.block_inject_weight.weight": [
+  "BF16",
+  [
+   4,
+   10240
+  ]
+ ],
+ "model.language_model.layers.N.mlp_hyper_connection.hc_norm.weight": [
+  "BF16",
+  [
+   10240
+  ]
+ ],
+ "model.language_model.layers.N.mlp_hyper_connection.input_mix_weight_down.weight": [
+  "BF16",
+  [
+   320,
+   10240
+  ]
+ ],
+ "model.language_model.layers.N.mlp_hyper_connection.input_mix_weight_up.weight": [
+  "BF16",
+  [
+   10240,
+   320
+  ]
+ ],
+ "model.language_model.layers.N.ple.conv1d.weight": [
+  "BF16",
+  [
+   10240,
+   1,
+   4
+  ]
+ ],
+ "model.language_model.layers.N.ple.key_proj.weight": [
+  "BF16",
+  [
+   10240,
+   2560
+  ]
+ ],
+ "model.language_model.layers.N.ple.norm_conv.weight": [
+  "BF16",
+  [
+   10240
+  ]
+ ],
+ "model.language_model.layers.N.ple.norm_key.weight": [
+  "BF16",
+  [
+   10240
+  ]
+ ],
+ "model.language_model.layers.N.ple.norm_query.weight": [
+  "BF16",
+  [
+   10240
+  ]
+ ],
+ "model.language_model.layers.N.ple.ple_embedding.layer_multipliers": [
+  "I64",
+  [
+   3
+  ]
+ ],
+ "model.language_model.layers.N.ple.ple_embedding.ngram_embedding.shard_S.weight": [
+  "BF16",
+  [
+   2500012,
+   160
+  ]
+ ],
+ "model.language_model.layers.N.ple.ple_embedding.ngram_heads_offsets": [
+  "I64",
+  [
+   16
+  ]
+ ],
+ "model.language_model.layers.N.ple.ple_embedding.ngram_heads_vocab_sizes": [
+  "I64",
+  [
+   16
+  ]
+ ],
+ "model.language_model.layers.N.ple.value_proj.weight": [
+  "BF16",
+  [
+   2560,
+   2560
+  ]
+ ],
+ "model.language_model.layers.N.self_attn.indexer.index_qk_proj.weight": [
+  "BF16",
+  [
+   640,
+   2560
+  ]
+ ],
+ "model.language_model.layers.N.self_attn.indexer.k_layernorm.weight": [
+  "BF16",
+  [
+   128
+  ]
+ ],
+ "model.language_model.layers.N.self_attn.indexer.q_layernorm.weight": [
+  "BF16",
+  [
+   128
+  ]
+ ],
+ "model.language_model.layers.N.self_attn.k_norm.weight": [
+  "BF16",
+  [
+   256
+  ]
+ ],
+ "model.language_model.layers.N.self_attn.k_proj.weight": [
+  "BF16",
+  [
+   512,
+   2560
+  ]
+ ],
+ "model.language_model.layers.N.self_attn.o_proj.weight": [
+  "BF16",
+  [
+   2560,
+   6144
+  ]
+ ],
+ "model.language_model.layers.N.self_attn.q_norm.weight": [
+  "BF16",
+  [
+   256
+  ]
+ ],
+ "model.language_model.layers.N.self_attn.q_proj.weight": [
+  "BF16",
+  [
+   12288,
+   2560
+  ]
+ ],
+ "model.language_model.layers.N.self_attn.v_proj.weight": [
+  "BF16",
+  [
+   512,
+   2560
+  ]
+ ],
+ "model.visual.blocks.N.attn.proj.bias": [
+  "BF16",
+  [
+   1152
+  ]
+ ],
+ "model.visual.blocks.N.attn.proj.weight": [
+  "BF16",
+  [
+   1152,
+   1152
+  ]
+ ],
+ "model.visual.blocks.N.attn.qkv.bias": [
+  "BF16",
+  [
+   3456
+  ]
+ ],
+ "model.visual.blocks.N.attn.qkv.weight": [
+  "BF16",
+  [
+   3456,
+   1152
+  ]
+ ],
+ "model.visual.blocks.N.mlp.linear_fc1.bias": [
+  "BF16",
+  [
+   4304
+  ]
+ ],
+ "model.visual.blocks.N.mlp.linear_fc1.weight": [
+  "BF16",
+  [
+   4304,
+   1152
+  ]
+ ],
+ "model.visual.blocks.N.mlp.linear_fc2.bias": [
+  "BF16",
+  [
+   1152
+  ]
+ ],
+ "model.visual.blocks.N.mlp.linear_fc2.weight": [
+  "BF16",
+  [
+   1152,
+   4304
+  ]
+ ],
+ "model.visual.blocks.N.norm1.bias": [
+  "BF16",
+  [
+   1152
+  ]
+ ],
+ "model.visual.blocks.N.norm1.weight": [
+  "BF16",
+  [
+   1152
+  ]
+ ],
+ "model.visual.blocks.N.norm2.bias": [
+  "BF16",
+  [
+   1152
+  ]
+ ],
+ "model.visual.blocks.N.norm2.weight": [
+  "BF16",
+  [
+   1152
+  ]
+ ],
+ "model.visual.merger.linear_fc1.bias": [
+  "BF16",
+  [
+   4608
+  ]
+ ],
+ "model.visual.merger.linear_fc1.weight": [
+  "BF16",
+  [
+   4608,
+   4608
+  ]
+ ],
+ "model.visual.merger.linear_fc2.bias": [
+  "BF16",
+  [
+   2560
+  ]
+ ],
+ "model.visual.merger.linear_fc2.weight": [
+  "BF16",
+  [
+   2560,
+   4608
+  ]
+ ],
+ "model.visual.merger.norm.bias": [
+  "BF16",
+  [
+   1152
+  ]
+ ],
+ "model.visual.merger.norm.weight": [
+  "BF16",
+  [
+   1152
+  ]
+ ],
+ "model.visual.patch_embed.proj.bias": [
+  "BF16",
+  [
+   1152
+  ]
+ ],
+ "model.visual.patch_embed.proj.weight": [
+  "BF16",
+  [
+   1152,
+   3,
+   2,
+   16,
+   16
+  ]
+ ],
+ "model.visual.pos_embed.weight": [
+  "BF16",
+  [
+   2304,
+   1152
+  ]
+ ],
+ "mtp.fc_embedding.weight": [
+  "BF16",
+  [
+   2560,
+   2560
+  ]
+ ],
+ "mtp.fc_hidden.weight": [
+  "BF16",
+  [
+   2560,
+   2560
+  ]
+ ],
+ "mtp.hyper_connection_mixer.hc_norm.weight": [
+  "BF16",
+  [
+   10240
+  ]
+ ],
+ "mtp.hyper_connection_mixer.input_mix_weight_down.weight": [
+  "BF16",
+  [
+   320,
+   10240
+  ]
+ ],
+ "mtp.hyper_connection_mixer.input_mix_weight_up.weight": [
+  "BF16",
+  [
+   10240,
+   320
+  ]
+ ],
+ "mtp.layers.N.attn_hyper_connection.block_inject_weight.weight": [
+  "BF16",
+  [
+   4,
+   10240
+  ]
+ ],
+ "mtp.layers.N.attn_hyper_connection.hc_norm.weight": [
+  "BF16",
+  [
+   10240
+  ]
+ ],
+ "mtp.layers.N.attn_hyper_connection.input_mix_weight_down.weight": [
+  "BF16",
+  [
+   320,
+   10240
+  ]
+ ],
+ "mtp.layers.N.attn_hyper_connection.input_mix_weight_up.weight": [
+  "BF16",
+  [
+   10240,
+   320
+  ]
+ ],
+ "mtp.layers.N.mlp.experts.down_proj": [
+  "BF16",
+  [
+   512,
+   2560,
+   640
+  ]
+ ],
+ "mtp.layers.N.mlp.experts.gate_up_proj": [
+  "BF16",
+  [
+   512,
+   1280,
+   2560
+  ]
+ ],
+ "mtp.layers.N.mlp.gate.weight": [
+  "BF16",
+  [
+   512,
+   2560
+  ]
+ ],
+ "mtp.layers.N.mlp.shared_expert.down_proj.weight": [
+  "BF16",
+  [
+   2560,
+   640
+  ]
+ ],
+ "mtp.layers.N.mlp.shared_expert.gate_proj.weight": [
+  "BF16",
+  [
+   640,
+   2560
+  ]
+ ],
+ "mtp.layers.N.mlp.shared_expert.up_proj.weight": [
+  "BF16",
+  [
+   640,
+   2560
+  ]
+ ],
+ "mtp.layers.N.mlp.shared_expert_gate.weight": [
+  "BF16",
+  [
+   1,
+   2560
+  ]
+ ],
+ "mtp.layers.N.mlp_hyper_connection.block_inject_weight.weight": [
+  "BF16",
+  [
+   4,
+   10240
+  ]
+ ],
+ "mtp.layers.N.mlp_hyper_connection.hc_norm.weight": [
+  "BF16",
+  [
+   10240
+  ]
+ ],
+ "mtp.layers.N.mlp_hyper_connection.input_mix_weight_down.weight": [
+  "BF16",
+  [
+   320,
+   10240
+  ]
+ ],
+ "mtp.layers.N.mlp_hyper_connection.input_mix_weight_up.weight": [
+  "BF16",
+  [
+   10240,
+   320
+  ]
+ ],
+ "mtp.layers.N.self_attn.indexer.index_qk_proj.weight": [
+  "BF16",
+  [
+   640,
+   2560
+  ]
+ ],
+ "mtp.layers.N.self_attn.indexer.k_layernorm.weight": [
+  "BF16",
+  [
+   128
+  ]
+ ],
+ "mtp.layers.N.self_attn.indexer.q_layernorm.weight": [
+  "BF16",
+  [
+   128
+  ]
+ ],
+ "mtp.layers.N.self_attn.k_norm.weight": [
+  "BF16",
+  [
+   256
+  ]
+ ],
+ "mtp.layers.N.self_attn.k_proj.weight": [
+  "BF16",
+  [
+   512,
+   2560
+  ]
+ ],
+ "mtp.layers.N.self_attn.o_proj.weight": [
+  "BF16",
+  [
+   2560,
+   6144
+  ]
+ ],
+ "mtp.layers.N.self_attn.q_norm.weight": [
+  "BF16",
+  [
+   256
+  ]
+ ],
+ "mtp.layers.N.self_attn.q_proj.weight": [
+  "BF16",
+  [
+   12288,
+   2560
+  ]
+ ],
+ "mtp.layers.N.self_attn.v_proj.weight": [
+  "BF16",
+  [
+   512,
+   2560
+  ]
+ ],
+ "mtp.pre_fc_norm_embedding.weight": [
+  "BF16",
+  [
+   2560
+  ]
+ ],
+ "mtp.pre_fc_norm_hidden.weight": [
+  "BF16",
+  [
+   10240
+  ]
+ ]
+}

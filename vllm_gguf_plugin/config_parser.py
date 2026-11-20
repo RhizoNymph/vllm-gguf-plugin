@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import gguf
+
 from transformers import PretrainedConfig
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 from vllm.transformers_utils.config import HFConfigParser
@@ -39,6 +41,24 @@ def _find_local_gguf_file(model: str | Path) -> str | None:
     return None
 
 
+# GGUF architectures whose config cannot be rebuilt from metadata: the file
+# omits fields the vLLM model needs, so the HF repo has to supply it.
+_CONFIG_REPOS = {"qwen4exp": "Qwen/Qwen3.8-Flash-Next"}
+
+
+def _reject_config_from_metadata_only(gguf_file: str) -> None:
+    reader = gguf.GGUFReader(gguf_file)
+    field = reader.fields.get("general.architecture")
+    architecture = field.contents() if field is not None else None
+    repo = _CONFIG_REPOS.get(architecture)
+    if repo is not None:
+        raise RuntimeError(
+            f"A {architecture} GGUF cannot provide its own HF config. Pass the "
+            f"original repo for config and tokenizer, e.g. --tokenizer {repo} "
+            f"(or --hf-config-path {repo})."
+        )
+
+
 class GGUFConfigParser(ConfigParserBase):
     def parse(
         self,
@@ -51,6 +71,7 @@ class GGUFConfigParser(ConfigParserBase):
         original_model = model
         gguf_file_path = _find_local_gguf_file(model)
         if gguf_file_path is not None:
+            _reject_config_from_metadata_only(gguf_file_path)
             # Pure-GGUF source (no config.json): have transformers read the
             # config straight from the GGUF metadata via ``gguf_file``.
             resolved_model = Path(gguf_file_path).parent

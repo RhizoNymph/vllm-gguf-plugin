@@ -10,9 +10,12 @@ from pathlib import Path
 import gguf
 import numpy as np
 import torch
+from gguf import GGMLQuantizationType
 from huggingface_hub import hf_hub_download, snapshot_download
 from vllm.logger import init_logger
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
+
+from .gguf_compat import F8_E4M3, Q1_0, Q2_0, transcode_q2_0_to_q4_0
 
 logger = init_logger(__name__)
 
@@ -203,10 +206,19 @@ def gguf_quant_weights_iterator_multi(
                 name = tensor.name
 
             weight_type = tensor.tensor_type
+            weight = tensor.data
+            if weight_type == Q2_0:
+                # No Q2_0 kernels; Q4_0 holds the same values exactly.
+                weight = transcode_q2_0_to_q4_0(weight)
+                weight_type = GGMLQuantizationType.Q4_0
+            elif weight_type in (Q1_0, F8_E4M3):
+                raise NotImplementedError(
+                    f"GGUF tensor {tensor.name} uses ggml type {weight_type.name}, "
+                    "which the GGUF plugin cannot serve yet"
+                )
             if weight_type.name not in _QUANT_TYPES:
                 yield weight_type_name(name), torch.tensor(weight_type)
 
-            weight = tensor.data
             if weight_type.name == "BF16" and weight.dtype == np.uint8:
                 weight = weight.view(np.uint16)
                 if reader.byte_order == "S":

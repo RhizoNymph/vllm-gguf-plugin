@@ -25,6 +25,13 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def unpermute_rope_rows(weight: torch.Tensor, num_heads: int) -> torch.Tensor:
+    """Invert llama.cpp's Q/K row permutation, row-wise so packed data is kept."""
+    rows = weight.shape[0]
+    weight = weight.reshape(num_heads, rows // num_heads // 2, 2, *weight.shape[1:])
+    return weight.transpose(1, 2).reshape(rows, *weight.shape[3:])
+
+
 class TransformersGGUFWeightsAdapter(BaseGGUFWeightsAdapter):
     """GGUF weights adapter based on Transformers tensor-name mappings."""
 
@@ -253,5 +260,34 @@ class TransformersGGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         weights: Iterable[GGUFWeight],
         model_config: ModelConfig,
     ) -> Iterable[GGUFWeight]:
-        del model_config
-        yield from split_stacked_experts(weights)
+        # vLLM's GPT2 transposes every ``.weight`` of c_attn/c_proj/c_fc at
+        # load time (HF Conv1D layout). Packed quantized GGUF tensors must
+        # keep their GGUF layout, so pre-transpose them to cancel it out.
+        is_gpt2 = model_config.hf_config.model_type == "gpt2"
+        # llama.cpp permutes Llama Q/K rows for its interleaved RoPE, undo it
+        text_config = model_config.hf_config.get_text_config()
+        num_heads = {}
+        if text_config.model_type in ("llama", "mistral"):
+            num_heads = {
+                ".q_proj.weight": text_config.num_attention_heads,
+                ".k_proj.weight": text_config.num_key_value_heads,
+            }
+
+        def transformed() -> Iterable[GGUFWeight]:
+            quantized_bases: set[str] = set()
+            for name, weight in weights:
+                # weight_type entries arrive before their packed weight data.
+                if name.endswith(".weight_type"):
+                    quantized_bases.add(name.removesuffix(".weight_type"))
+                elif (
+                    is_gpt2
+                    and name.endswith(".weight")
+                    and any(proj in name for proj in ("c_attn", "c_proj", "c_fc"))
+                    and name.removesuffix(".weight") in quantized_bases
+                ):
+                    weight = weight.t()
+                elif heads := num_heads.get(name[-len(".q_proj.weight") :]):
+                    weight = unpermute_rope_rows(weight, heads)
+                yield name, weight
+
+        yield from split_stacked_experts(transformed())

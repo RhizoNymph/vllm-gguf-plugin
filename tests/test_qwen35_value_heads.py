@@ -48,9 +48,11 @@ def _ggml_head_order(nk, ratio):
     return [r * nk + g for g in range(nk) for r in range(ratio)]
 
 
-def _restore(cfg, name, weight):
+def _restore(cfg, name, weight, quantized_bases=frozenset()):
     layout = _gdn_value_head_layout(cfg)
-    return Qwen35GGUFAdapter()._restore_gdn_weight(name, weight, cfg, layout)
+    return Qwen35GGUFAdapter()._restore_gdn_weight(
+        name, weight, cfg, layout, set(quantized_bases)
+    )
 
 
 def test_value_heads_regrouped_under_key_head():
@@ -94,19 +96,21 @@ def test_out_proj_gets_a_layout_so_activations_are_reordered():
 
 
 def test_packed_out_proj_is_left_in_ggml_order():
-    """Quantised tensors arrive renamed to ``.qweight``. Permuting bytes
-    inside a packed row could split a quantisation block, so the weight must
-    be handed through untouched - the layout fixes up the input instead."""
+    """Quantised tensors keep their ``.weight`` name and are announced by a
+    preceding ``.weight_type`` entry. Permuting bytes inside a packed row could
+    split a quantisation block, so the weight must be handed through untouched
+    - the layout fixes up the input instead."""
     nk, ratio, hv = 4, 3, 128
     cfg = _Cfg(nk=nk, nv=nk * ratio, hv=hv)
     src = torch.zeros((8, nk * ratio * 88), dtype=torch.uint8)
-    assert _restore(cfg, "model.layers.0.linear_attn.out_proj.qweight", src) is None
+    base = "model.layers.0.linear_attn.out_proj"
+    assert _restore(cfg, f"{base}.weight", src, {base}) is None
 
 
-def test_qweight_type_scalars_are_left_alone():
+def test_weight_type_scalars_are_left_alone():
     cfg = _Cfg(nk=4, nv=12, hv=1)
     src = torch.tensor([13], dtype=torch.uint8)
-    out = _restore(cfg, "model.layers.0.linear_attn.in_proj_z.qweight_type", src)
+    out = _restore(cfg, "model.layers.0.linear_attn.in_proj_z.weight_type", src)
     assert out is None
 
 

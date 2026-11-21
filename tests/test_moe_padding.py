@@ -24,12 +24,12 @@ def test_mask_padded_slots_points_padding_at_expert_zero_with_no_weight():
 
     assert safe_ids.dtype == torch.int32
     assert safe_ids.tolist() == [[3, 1], [0, 0], [2, 0]]
-    assert masked_weights.tolist() == pytest.approx(
-        [[0.5, 0.25], [0.0, 0.0], [0.9, 0.0]]
+    torch.testing.assert_close(
+        masked_weights, torch.tensor([[0.5, 0.25], [0.0, 0.0], [0.9, 0.0]])
     )
     # The inputs are left untouched.
     assert ids[1].tolist() == [-1, -1]
-    assert weights[1].tolist() == pytest.approx([0.7, 0.3])
+    torch.testing.assert_close(weights[1], torch.tensor([0.7, 0.3]))
 
 
 def _q8_0_experts(num_experts: int, rows: int, cols: int, seed: int) -> torch.Tensor:

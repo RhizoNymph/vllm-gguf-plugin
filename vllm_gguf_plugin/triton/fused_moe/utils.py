@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -18,6 +20,7 @@ from ..gemm.utils import (
     GGML_TYPE_IQ3_XXS,
     GGML_TYPE_IQ4_NL,
     GGML_TYPE_IQ4_XS,
+    GGML_TYPE_NVFP4,
     GGML_TYPE_Q2_K,
     GGML_TYPE_Q3_K,
     GGML_TYPE_Q4_0,
@@ -56,8 +59,12 @@ TRITON_FUSED_MOE_SUPPORTED_TYPES = frozenset(
         GGML_TYPE_IQ3_XXS,
         GGML_TYPE_IQ4_NL,
         GGML_TYPE_IQ4_XS,
+        GGML_TYPE_NVFP4,
     }
 )
+
+# Triton's interpreter runs the kernels on CPU tensors (CPU tests).
+TRITON_INTERPRET = os.environ.get("TRITON_INTERPRET") == "1"
 
 TRITON_FUSED_MOE_BLOCK_M = 4
 TRITON_FUSED_MOE_BLOCK_N = 128
@@ -154,7 +161,7 @@ def _validate_args(
 ]:
     if quant_type not in TRITON_FUSED_MOE_SUPPORTED_TYPES:
         raise ValueError(f"Unsupported Triton fused MoE quant type: {quant_type}")
-    if not all(
+    if not TRITON_INTERPRET and not all(
         t.is_cuda for t in (W, X, sorted_token_ids, expert_ids, num_tokens_post_padded)
     ):
         raise ValueError("Triton fused MoE kernels require CUDA tensors")

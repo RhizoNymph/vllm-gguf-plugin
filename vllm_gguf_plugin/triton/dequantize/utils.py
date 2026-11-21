@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -10,6 +12,8 @@ from ..gemm.utils import (
     TRITON_SUPPORTED_TYPES,
 )
 
+# Triton's interpreter runs the kernels on CPU tensors (CPU tests).
+TRITON_INTERPRET = os.environ.get("TRITON_INTERPRET") == "1"
 TRITON_DEQUANT_BLOCK_SIZE = 256
 TRITON_DEQUANT_SUPPORTED_TYPES = TRITON_SUPPORTED_TYPES
 TRITON_DEQUANT_SUPPORTED_DTYPES = (
@@ -78,7 +82,7 @@ def validate_dequant_args(
     quant_type = int(quant_type)
     if quant_type not in TRITON_DEQUANT_SUPPORTED_TYPES:
         raise ValueError(f"Unsupported Triton dequant quant type: {quant_type}")
-    if not W.is_cuda:
+    if not W.is_cuda and not TRITON_INTERPRET:
         raise ValueError("Triton dequant kernels require CUDA tensors")
     if W.dtype is not torch.uint8:
         raise TypeError(f"Quantized weights must be torch.uint8, got {W.dtype}")

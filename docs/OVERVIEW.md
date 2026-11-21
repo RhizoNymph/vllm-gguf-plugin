@@ -46,13 +46,17 @@ Overview:
       GGUFModelLoader plus weights_adapter/* map ggml tensor names onto vLLM
       parameter names, handling per-architecture fusions (qkv, gate_up) and
       multimodal/mmproj sidecars. gguf_compat.py teaches gguf-py the ggml
-      types it predates (Q1_0/Q2_0/F8_E4M3) and transcodes Q2_0 to Q4_0;
+      types it predates (Q1_0/Q2_0/F8_E4M3) and transcodes Q2_0 to Q4_0 and
+      MXFP4 to Q5_0 (both bit-exact);
       adapters can record storage decisions on the quant config before the
       model is built (configure_quant_config).
     quantization: >
       quantization/* implements the GGUF quantization backend (linear, MoE,
       embeddings) over ggml block layouts; triton/ and csrc/ hold the
-      dequantisation kernels.
+      dequantisation kernels. ggml NVFP4 has Triton kernels only
+      (dequantize, fused MoE). MoE layers may carry per-expert output scales
+      and SITU betas; merged linears with shards of different types store
+      them unpadded in one byte buffer.
   data_flow: >
     EngineArgs.create_model_config (patched) resolves the GGUF reference,
     forces quantization/load_format/config_format to "gguf", rewrites `model`
@@ -102,6 +106,20 @@ Features Index:
       - vllm_gguf_plugin.gguf_compat.ensure_new_ggml_types
     depends_on: [model_resolution, hybrid_models]
     doc: docs/features/qwen4exp.md
+  inkling2:
+    description: >
+      Serving unsloth's Inkling-2-Mini GGUF (ggml inkling2, looped MoE) on the
+      vLLM fork's Inkling2Loop QUANT_METHOD backend: config from the HF repo
+      validated against backbone and mmproj metadata, exact GGUF -> HF names
+      and llama.cpp conversions reversed, NVFP4 experts with per-expert
+      scales on Triton kernels, MXFP4 as exact Q5_0, a BF16 shard inside a
+      quantized merged q_proj, and the DSpark draft's name map.
+    entry_points:
+      - vllm_gguf_plugin.weights_adapter.inkling2.Inkling2GGUFAdapter
+      - vllm_gguf_plugin.triton.fused_moe.fp4_quant.ggml_moe_nvfp4_triton
+      - vllm_gguf_plugin.gguf_compat.transcode_mxfp4_to_q5_0
+    depends_on: [model_resolution]
+    doc: docs/features/inkling2.md
 ```
 
 ## Invariants

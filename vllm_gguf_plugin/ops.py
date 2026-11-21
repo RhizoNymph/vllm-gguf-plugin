@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from collections.abc import Mapping
+from types import MappingProxyType
 
 import torch
 
@@ -18,6 +20,7 @@ from .triton.gemm.utils import (
     GGML_TYPE_IQ3_XXS,
     GGML_TYPE_IQ4_NL,
     GGML_TYPE_IQ4_XS,
+    GGML_TYPE_NVFP4,
     GGML_TYPE_Q2_K,
     GGML_TYPE_Q3_K,
     GGML_TYPE_Q4_0,
@@ -51,7 +54,8 @@ except ImportError:
 # Effective CUDA usage: only when enabled AND available.
 _CUDA_ENABLED = _USE_CUDA and _CUDA_AVAILABLE
 
-_CUDA_GEMV_QUANT_TYPES = frozenset(
+# ggml types each CUDA op serves; anything else goes to the Triton kernels.
+_CUDA_DEQUANT_QUANT_TYPES = frozenset(
     {
         GGML_TYPE_Q4_0,
         GGML_TYPE_Q4_1,
@@ -74,6 +78,9 @@ _CUDA_GEMV_QUANT_TYPES = frozenset(
         GGML_TYPE_IQ1_M,
     }
 )
+# NVFP4 has CUDA vector kernels (llama.cpp's vec_dot_nvfp4_q8_1) but no CUDA
+# dequantize or MMQ kernel: those stay on Triton.
+_CUDA_GEMV_QUANT_TYPES = _CUDA_DEQUANT_QUANT_TYPES | {GGML_TYPE_NVFP4}
 _CUDA_GEMM_QUANT_TYPES = frozenset(
     {
         GGML_TYPE_Q4_0,
@@ -88,21 +95,27 @@ _CUDA_GEMM_QUANT_TYPES = frozenset(
         GGML_TYPE_Q6_K,
     }
 )
+CUDA_OP_QUANT_TYPES: Mapping[str, frozenset[int]] = MappingProxyType(
+    {
+        "ggml_dequantize": _CUDA_DEQUANT_QUANT_TYPES,
+        "ggml_mul_mat_vec_a8": _CUDA_GEMV_QUANT_TYPES,
+        "ggml_moe_a8_vec": _CUDA_GEMV_QUANT_TYPES,
+        "ggml_mul_mat_a8": _CUDA_GEMM_QUANT_TYPES,
+        "ggml_moe_a8": _CUDA_GEMM_QUANT_TYPES,
+        # The block size must match the grouped kernel ggml_moe_a8 picks.
+        "ggml_moe_get_block_size": _CUDA_GEMM_QUANT_TYPES,
+    }
+)
 
 
-def _cuda_kernel_available(op_name: str, quant_type: int | None = None) -> bool:
+def _cuda_kernel_available(op_name: str, quant_type: int) -> bool:
+    """True when the CUDA extension serves ``op_name`` for ``quant_type``."""
     if not _CUDA_ENABLED:
         return False
     namespace = getattr(torch.ops, "_C_gguf", None)
     if namespace is None or not hasattr(namespace, op_name):
         return False
-    if quant_type is None:
-        return True
-    return int(quant_type) in _CUDA_GEMV_QUANT_TYPES
-
-
-def _cuda_gemm_kernel_available(op_name: str, quant_type: int) -> bool:
-    return _cuda_kernel_available(op_name) and int(quant_type) in _CUDA_GEMM_QUANT_TYPES
+    return int(quant_type) in CUDA_OP_QUANT_TYPES[op_name]
 
 
 # --- Fake implementations for CUDA custom ops (needed for torch.compile) ---
@@ -203,7 +216,7 @@ def ggml_mul_mat_a8(
     quant_type: int,
     row: int,
 ) -> torch.Tensor:
-    if _cuda_gemm_kernel_available("ggml_mul_mat_a8", quant_type):
+    if _cuda_kernel_available("ggml_mul_mat_a8", quant_type):
         return torch.ops._C_gguf.ggml_mul_mat_a8(W, X, quant_type, row)
     return ggml_mul_mat_a8_triton(W, X, quant_type, row)
 
@@ -219,7 +232,7 @@ def ggml_moe_a8(
     top_k: int,
     tokens: int,
 ) -> torch.Tensor:
-    if _cuda_gemm_kernel_available("ggml_moe_a8", quant_type):
+    if _cuda_kernel_available("ggml_moe_a8", quant_type):
         return torch.ops._C_gguf.ggml_moe_a8(
             X,
             W,
@@ -277,7 +290,7 @@ def ggml_moe_a8_vec(
 
 
 def ggml_moe_get_block_size(quant_type: int) -> int:
-    if _cuda_gemm_kernel_available("ggml_moe_get_block_size", quant_type):
+    if _cuda_kernel_available("ggml_moe_get_block_size", quant_type):
         return torch.ops._C_gguf.ggml_moe_get_block_size(quant_type)
     return get_triton_moe_block_m(quant_type)
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import enum
 from functools import partial
 from typing import Optional
 
@@ -30,7 +31,45 @@ from .params import (
     _gguf_moe_weight_loader,
     _gguf_moe_weight_type_loader,
 )
-from .utils import MMQ_QUANT_TYPES, MOE_VEC_QUANT_TYPES, logger
+from .utils import FP4_QUANT_TYPES, MMQ_QUANT_TYPES, MOE_VEC_QUANT_TYPES, logger
+
+
+class MoEKernel(enum.Enum):
+    """How ``_fused_moe_gguf`` runs the expert GEMMs."""
+
+    # ``ggml_moe_a8`` over token slots grouped by expert
+    # (``moe_align_block_size``): CUDA MMQ, or Triton for NVFP4.
+    GROUPED = enum.auto()
+    # ``ggml_moe_a8_vec``: one matrix-vector product per (token, expert) pair
+    # (CUDA MMVQ; Triton where CUDA has no kernel for the type).
+    VECTOR = enum.auto()
+    # ``fused_mul_mat_gguf`` per token and expert (dense or unknown types).
+    PER_TOKEN = enum.auto()
+
+
+# Above this many tokens the grouped kernels read each expert's weights once
+# per block of tokens instead of once per (token, expert) pair.
+GROUPED_MOE_MIN_TOKENS = 64
+
+
+def select_moe_kernel(
+    weight_type: int, weight_type2: int, num_tokens: int
+) -> MoEKernel:
+    """Pick the MoE kernel for gate/up type ``weight_type`` and down type
+    ``weight_type2``.
+
+    A grouped launch aligns tokens once with one block size for both GEMMs,
+    so both types must use the same grouped backend: CUDA MMQ, or the
+    Triton FP4 kernel (NVFP4 has no CUDA MMQ kernel). Mixed pairs and
+    smaller batches run per (token, expert) pair.
+    """
+    types = {weight_type, weight_type2}
+    same_grouped_backend = types <= MMQ_QUANT_TYPES or types <= FP4_QUANT_TYPES
+    if num_tokens > GROUPED_MOE_MIN_TOKENS and same_grouped_backend:
+        return MoEKernel.GROUPED
+    if types <= MOE_VEC_QUANT_TYPES:
+        return MoEKernel.VECTOR
+    return MoEKernel.PER_TOKEN
 
 
 def _fused_moe_gguf(
@@ -86,85 +125,85 @@ def _fused_moe_gguf(
     from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 
     out_hidden_states = torch.empty_like(x)
-    if (
-        weight_type2 in MMQ_QUANT_TYPES
-        and weight_type in MMQ_QUANT_TYPES
-        and x.shape[0] > 64
-    ):
-        num_tokens, _ = x.shape
-        E, N, _ = w1.shape
-        top_k = topk_ids.shape[1]
-        block_size = ops.ggml_moe_get_block_size(weight_type)
+    kernel = select_moe_kernel(weight_type, weight_type2, x.shape[0])
+    match kernel:
+        case MoEKernel.GROUPED:
+            num_tokens, _ = x.shape
+            E, N, _ = w1.shape
+            top_k = topk_ids.shape[1]
+            block_size = ops.ggml_moe_get_block_size(weight_type)
 
-        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            topk_ids, block_size, E
-        )
-        out = ops.ggml_moe_a8(
-            x,
-            w1,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            weight_type,
-            N,
-            top_k,
-            num_tokens,
-        )
-        out = act(scale_rows(out, w13_scale))
-        out = ops.ggml_moe_a8(
-            out,
-            w2,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            weight_type2,
-            w2.shape[1],
-            1,
-            num_tokens * top_k,
-        )
-        out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
-            route_weights.view(num_tokens, top_k, 1)
-        )
-        ops.moe_sum(out, out_hidden_states)
-    elif weight_type2 in MOE_VEC_QUANT_TYPES and weight_type in MOE_VEC_QUANT_TYPES:
-        num_tokens, _ = x.shape
-        E, N, _ = w1.shape
-        top_k = topk_ids.shape[1]
+            sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+                topk_ids, block_size, E
+            )
+            out = ops.ggml_moe_a8(
+                x,
+                w1,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                weight_type,
+                N,
+                top_k,
+                num_tokens,
+            )
+            out = act(scale_rows(out, w13_scale))
+            out = ops.ggml_moe_a8(
+                out,
+                w2,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                weight_type2,
+                w2.shape[1],
+                1,
+                num_tokens * top_k,
+            )
+            out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
+                route_weights.view(num_tokens, top_k, 1)
+            )
+            ops.moe_sum(out, out_hidden_states)
+        case MoEKernel.VECTOR:
+            num_tokens, _ = x.shape
+            E, N, _ = w1.shape
+            top_k = topk_ids.shape[1]
 
-        out = ops.ggml_moe_a8_vec(x, w1, topk_ids, top_k, weight_type, N, num_tokens)
-        out = act(scale_rows(out, w13_scale))
+            out = ops.ggml_moe_a8_vec(
+                x, w1, topk_ids, top_k, weight_type, N, num_tokens
+            )
+            out = act(scale_rows(out, w13_scale))
 
-        out = ops.ggml_moe_a8_vec(
-            out, w2, topk_ids, 1, weight_type2, w2.shape[1], num_tokens * top_k
-        )
-        out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
-            route_weights.view(num_tokens, top_k, 1)
-        )
-        ops.moe_sum(out, out_hidden_states)
-    else:
-        from . import fused_mul_mat_gguf as fused_mul_mat_gguf_op
+            out = ops.ggml_moe_a8_vec(
+                out, w2, topk_ids, 1, weight_type2, w2.shape[1], num_tokens * top_k
+            )
+            out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
+                route_weights.view(num_tokens, top_k, 1)
+            )
+            ops.moe_sum(out, out_hidden_states)
+        case MoEKernel.PER_TOKEN:
+            from . import fused_mul_mat_gguf as fused_mul_mat_gguf_op
 
-        logger.warning_once(
-            "There is no support for fast MoE kernel "
-            "for current quantization method. "
-            "Falling back to slow implementation. "
-        )
-        for tok, (w, idx) in enumerate(zip(route_weights, topk_ids)):
-            inp = x[tok].reshape((1,) + x.shape[1:])
-            current_hidden_state = None
-            for ww, ii in zip(w, idx):
-                out = fused_mul_mat_gguf_op(inp, w1[ii], weight_type)
-                if w13_scale is not None:
-                    out = out * w13_scale[ii].to(out.dtype)
-                out = act(out)
-                current_state = fused_mul_mat_gguf_op(out, w2[ii], weight_type2).mul_(
-                    ww
-                )
-                if current_hidden_state is None:
-                    current_hidden_state = current_state
-                else:
-                    current_hidden_state.add_(current_state)
-            out_hidden_states[tok] = current_hidden_state
+            logger.warning_once(
+                "There is no support for fast MoE kernel "
+                "for current quantization method. "
+                "Falling back to slow implementation. "
+            )
+            for tok, (w, idx) in enumerate(zip(route_weights, topk_ids)):
+                inp = x[tok].reshape((1,) + x.shape[1:])
+                current_hidden_state = None
+                for ww, ii in zip(w, idx):
+                    out = fused_mul_mat_gguf_op(inp, w1[ii], weight_type)
+                    if w13_scale is not None:
+                        out = out * w13_scale[ii].to(out.dtype)
+                    out = act(out)
+                    current_state = fused_mul_mat_gguf_op(
+                        out, w2[ii], weight_type2
+                    ).mul_(ww)
+                    if current_hidden_state is None:
+                        current_hidden_state = current_state
+                    else:
+                        current_hidden_state.add_(current_state)
+                out_hidden_states[tok] = current_hidden_state
     return out_hidden_states
 
 

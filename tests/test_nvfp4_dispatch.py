@@ -61,7 +61,8 @@ def test_cuda_type_sets_for_existing_types_are_unchanged():
     assert ops.CUDA_OP_QUANT_TYPES["ggml_moe_a8_vec"] == vec
     gemm = ops.CUDA_OP_QUANT_TYPES["ggml_mul_mat_a8"]
     assert gemm == ops.CUDA_OP_QUANT_TYPES["ggml_moe_a8"]
-    assert gemm == {int(t) for t in MMQ_QUANT_TYPES}
+    assert gemm == ops.CUDA_OP_QUANT_TYPES["ggml_moe_get_block_size"]
+    assert gemm <= {int(t) for t in MMQ_QUANT_TYPES}
 
 
 def test_nvfp4_is_an_mmvq_type():
@@ -157,11 +158,15 @@ def recorded(monkeypatch):
     def moe_sum(inp, out):
         out.copy_(inp.sum(dim=1))
 
+    def activation(act, out, inp, *, activation_config=None, **_):
+        out.copy_(inp[..., : out.shape[-1]])
+
     import vllm.model_executor.layers.fused_moe.fused_moe as vllm_fused_moe
 
     monkeypatch.setattr(gguf_fused_moe.ops, "ggml_moe_a8", moe_a8)
     monkeypatch.setattr(gguf_fused_moe.ops, "ggml_moe_a8_vec", moe_a8_vec)
     monkeypatch.setattr(gguf_fused_moe.ops, "moe_sum", moe_sum)
+    monkeypatch.setattr(gguf_fused_moe, "apply_moe_activation", activation)
     monkeypatch.setattr(vllm_fused_moe, "moe_align_block_size", align)
     return calls
 

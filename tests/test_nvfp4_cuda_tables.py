@@ -28,7 +28,7 @@ VENDORED_COMMON = GGUF_CSRC / "llamacpp" / "ggml-common.h"
 
 def _int_table(text: str, name: str) -> list[int]:
     match = re.search(
-        rf"int8_t\s*,?\s*{name}\s*(?:\[16\]\s*=\s*\{{|,\s*16\))(.*?)(?:\}};|GGML_TABLE_END)",
+        rf"int8_t\W[^;{{]*?\b{name}\s*(?:\[16\]\s*=\s*\{{|,\s*16\))(.*?)(?:\}};|GGML_TABLE_END)",
         text,
         re.S,
     )

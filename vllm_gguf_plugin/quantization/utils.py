@@ -74,12 +74,15 @@ IMATRIX_QUANT_TYPES = {
     WeightType.IQ4_XS,
     WeightType.IQ4_NL,
 }
-# ggml FP4 types with Triton kernels only (dequantize, fused MoE).
+# ggml FP4 types: CUDA vector kernels (dense MMVQ, per-token MoE); Triton
+# dequantize and grouped fused MoE; no MMQ kernel.
 FP4_QUANT_TYPES = {WeightType.NVFP4}
 DEQUANT_TYPES = (
     STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES | FP4_QUANT_TYPES
 )
-MMVQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES
+MMVQ_QUANT_TYPES = (
+    STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES | FP4_QUANT_TYPES
+)
 MMQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES
 # Types the per-token MoE path (``ggml_moe_a8_vec``) serves.
-MOE_VEC_QUANT_TYPES = MMVQ_QUANT_TYPES | FP4_QUANT_TYPES
+MOE_VEC_QUANT_TYPES = MMVQ_QUANT_TYPES

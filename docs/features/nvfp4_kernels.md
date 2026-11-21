@@ -70,7 +70,13 @@ Otherwise the op runs its Triton kernel. NVFP4 is in the sets of
 2. `mul_mat_vec_q` / `moe_vec_q` (one warp per output row; for MoE, grid z
    = token x top-k slot, the expert read from `topk_ids`) iterate the row's
    NVFP4 blocks with `qk = 64`, `qi = QI_NVFP4 = 8`, `vdr = 4`: two threads
-   per block, each covering two 16-value sub-blocks.
+   per block, each covering two 16-value sub-blocks. A CUDA block holds
+   `GGML_CUDA_MMV_Y = 4` such warps (four rows), for every quant type: with
+   one-warp blocks an sm_86 SM's 16-block limit caps occupancy at 16 of 48
+   warps, too few loads in flight to approach bandwidth. Four rows per
+   block cut the Inkling 2 Mini NVFP4 MoE call from 39 to 32 µs and lift
+   decode 5-6% on Inkling and Qwen3.6-35B-A3B; results are bit-identical
+   (each row is still reduced by one warp).
 3. `vec_dot_nvfp4_q8_1` maps 8 codes at a time to doubled E2M1 int8 values
    with `__byte_perm` (`get_int2_from_table_16`, table `kvalues_mxfp4`),
    takes four `__dp4a` against the matching half of a q8_1 block, and scales

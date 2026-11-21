@@ -86,6 +86,8 @@ def _fused_mul_mat_gguf(
     if x.shape[0] == 0:
         return torch.empty(x.shape[0], weight.shape[0], dtype=x.dtype, device=x.device)
     if weight_type in UNQUANTIZED_TYPES:
+        if weight.dtype != x.dtype:
+            weight = weight.to(x.dtype)
         return x @ weight.T
     if x.shape[0] <= mmvq_safe and weight_type in MMVQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_vec_a8(weight, x, weight_type, weight.shape[0])
@@ -118,6 +120,26 @@ try:
     fused_mul_mat_gguf = torch.ops.vllm._fused_mul_mat_gguf
 except AttributeError as error:
     raise error
+
+
+_FLAT_ALIGN = 16
+
+
+def _shard_types(layer: torch.nn.Module) -> dict[int | str, int]:
+    """ggml type of every loaded shard of a merged GGUF linear."""
+    weight_type = layer.weight_type
+    return {
+        idx: weight_type.shard_weight_type.get(idx, weight_type.weight_type)
+        for idx in layer.weight.shard_id
+    }
+
+
+def _flat_shard(
+    weight: torch.Tensor, entry: tuple[int, int, int, torch.dtype]
+) -> torch.Tensor:
+    start, rows, cols, dtype = entry
+    size = rows * cols * torch.empty((), dtype=dtype).element_size()
+    return weight.data[start : start + size].view(dtype).view(rows, cols)
 
 
 @register_weight_loader_v2_supported_method
@@ -219,6 +241,12 @@ class GGUFLinearMethod(LinearMethodBase):
         weight = layer.weight
         shard_id_map = weight.shard_id_map
         shard_id = weight.shard_id
+        if (
+            len(weight.data_container) > 1
+            and len(set(_shard_types(layer).values())) > 1
+        ):
+            self._create_flat_weight_param(layer)
+            return
         if len(data_container := weight.data_container) > 1:
             dtype = {data.dtype for data in data_container}
             assert len(dtype) == 1, ValueError(
@@ -261,6 +289,49 @@ class GGUFLinearMethod(LinearMethodBase):
                 weight.data = torch.empty(0, dtype=weight.dtype, device=weight.device)
             layer.register_parameter("weight", padded_param)
 
+    def _create_flat_weight_param(self, layer: torch.nn.Module) -> None:
+        """Store shards of different ggml types back to back in one byte
+        buffer (16-byte aligned), without padding rows to the widest shard.
+
+        Each shard is read back as its own type in :meth:`apply`; a dense
+        (F32/F16/BF16) shard keeps its dtype through a view of its bytes.
+        """
+        weight = layer.weight
+        ordered = _gguf_ordered_shard_ids(weight.shard_id)
+        layout: dict[int | str, tuple[int, int, int, torch.dtype]] = {}
+        offset = 0
+        for idx in ordered:
+            data = weight.data_container[weight.shard_id_map[idx]]
+            offset = -(-offset // _FLAT_ALIGN) * _FLAT_ALIGN
+            layout[idx] = (offset, data.shape[0], data.shape[1], data.dtype)
+            offset += data.numel() * data.element_size()
+        flat = torch.zeros(offset, dtype=torch.uint8, device=weight.device)
+        for idx in ordered:
+            start, rows, cols, dtype = layout[idx]
+            data = weight.data_container[weight.shard_id_map[idx]].contiguous()
+            flat[start : start + data.numel() * data.element_size()] = data.view(
+                -1
+            ).view(torch.uint8)
+        flat_param = GGUFWeightParameter(
+            data=flat,
+            weight_loader=weight.weight_loader,
+            input_dim=weight.input_dim,
+            output_dim=weight.output_dim,
+            tensor_shape=weight.tensor_shape,
+        )
+        flat_param.data_container = []
+        flat_param.shard_id = ordered
+        flat_param.shard_id_map = dict(weight.shard_id_map)
+        if hasattr(weight, "ignore_warning"):
+            flat_param.ignore_warning = weight.ignore_warning
+        set_weight_attrs(flat_param, {"flat_shard_layout": layout})
+        weight.data_container.clear()
+        weight.shard_id.clear()
+        weight.shard_id_map.clear()
+        if weight.data.numel() > 0:
+            weight.data = torch.empty(0, dtype=weight.dtype, device=weight.device)
+        layer.register_parameter("weight", flat_param)
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -274,6 +345,22 @@ class GGUFLinearMethod(LinearMethodBase):
         # The GGUF kernels take 2D inputs, so flatten any leading batch dims
         lead_shape = x.shape[:-1]
         x = x.reshape(-1, x.shape[-1])
+
+        layout = getattr(layer.weight, "flat_shard_layout", None)
+        if layout is not None:
+            types = _shard_types(layer)
+            out = torch.cat(
+                [
+                    fused_mul_mat_gguf_op(
+                        x, _flat_shard(layer.weight, layout[idx]), types[idx]
+                    )
+                    for idx in layout
+                ],
+                dim=1,
+            )
+            if bias is not None:
+                out.add_(bias)
+            return out.view(*lead_shape, -1)
 
         shard_id = layer.weight.shard_id
         if shard_id:

@@ -190,6 +190,20 @@ typedef struct {
     uint8_t  qs[QK_K/2];
 } block_iq4_xs;
 
+// ggml NVFP4, copied from llamacpp/ggml-common.h (see LLAMA_CPP_VERSION.txt):
+// 64 values, four UE4M3 scales (one per 16 values) then 32 bytes of E2M1
+// codes. Sub-block s holds values 16s..16s+7 in the low nibbles of
+// qs[8s..8s+7] and values 16s+8..16s+15 in the high nibbles.
+#define QK_NVFP4 64
+#define QK_NVFP4_SUB 16
+#define QR_NVFP4 2
+#define QI_NVFP4 (QK_NVFP4 / (4 * QR_NVFP4))
+typedef struct {
+    uint8_t d[QK_NVFP4/QK_NVFP4_SUB]; // UE4M3 scales, one per 16-value sub-block
+    uint8_t qs[QK_NVFP4/2];           // packed E2M1 codes
+} block_nvfp4;
+static_assert(sizeof(block_nvfp4) == 36, "wrong nvfp4 block size/padding");
+
 static const __device__ uint64_t iq2xxs_grid[256] = {
     0x0808080808080808, 0x080808080808082b, 0x0808080808081919, 0x0808080808082b08,
     0x0808080808082b2b, 0x0808080808190819, 0x0808080808191908, 0x08080808082b0808,
@@ -1058,6 +1072,10 @@ static const __device__ uint64_t ksigns64[128] = {
 
 static const __device__ uint8_t kmask_iq2xs[8] = {1, 2, 4, 8, 16, 32, 64, 128};
 static const __device__ int8_t kvalues_iq4nl[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+// E2M1 values doubled (as in llamacpp/ggml-common.h); the NVFP4 vec dot halves
+// the UE4M3 scale to compensate. Aligned for the 32-bit loads of the table
+// lookup in vecdotq.cuh.
+static const __device__ __align__(16) int8_t kvalues_mxfp4[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
 
 
 typedef half dfloat; // dequantize float

@@ -5,6 +5,7 @@
 #include <torch/csrc/stable/accelerator.h>
 #include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/util/Exception.h>
 
 #include "../cuda_compat.h"
 #include "../dispatch_utils.h"
@@ -215,6 +216,14 @@ Tensor ggml_mul_mat_vec_a8(Tensor W,  // quant weight
             (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
             (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
         break;
+      case 40:  // NVFP4
+        mul_mat_vec_nvfp4_q8_1_cuda<scalar_t>(
+            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+        break;
+      default:
+        STD_TORCH_CHECK(false, "ggml_mul_mat_vec_a8: unsupported ggml type ",
+                        type);
     }
   });
   return Y;
@@ -570,6 +579,14 @@ Tensor ggml_moe_a8_vec(Tensor X,  // input
             (scalar_t*)Y.data_ptr(), (int*)topk_ids.data_ptr(), top_k, tokens,
             col, row, quant_X.stride(0), stream);
         break;
+      case 40:  // NVFP4
+        moe_vec_nvfp4_q8_1_cuda<scalar_t>(
+            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), (int*)topk_ids.data_ptr(), top_k, tokens,
+            col, row, quant_X.stride(0), stream);
+        break;
+      default:
+        STD_TORCH_CHECK(false, "ggml_moe_a8_vec: unsupported ggml type ", type);
     }
   });
   return Y;

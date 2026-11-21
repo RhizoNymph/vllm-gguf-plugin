@@ -1810,3 +1810,93 @@ static __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(
     return d * (sumi1 + sumi2);
 #endif
 }
+// ggml NVFP4 x q8_1, copied from llamacpp/vecdotq.cuh and llamacpp/common.cuh
+// (see LLAMA_CPP_VERSION.txt). Two adaptations: this file's vec_dot_q_cuda_t
+// passes a block pointer already offset by the caller (llama.cpp's kbx is 0),
+// and the table lookup returns its int2 under its own name, since this file
+// already has a get_int_from_table_16 with another signature.
+#define VDR_NVFP4_Q8_1_MMVQ 4
+
+// q4 holds 8 four-bit indices; returns the table bytes at the even indices in
+// .x and at the odd ones in .y (llama.cpp's get_int_from_table_16).
+static __device__ __forceinline__ int2 get_int2_from_table_16(const int & q4, const int8_t * table) {
+#if defined(USE_ROCM)
+    const int      q0_32  = (q4 >> 0) & 0x0F0F0F0F;
+    const int8_t * q0_8   = (const int8_t *) &q0_32;
+    const char4    val0_8 = make_char4(
+        table[q0_8[0]], table[q0_8[1]], table[q0_8[2]], table[q0_8[3]]);
+
+    const int      q1_32  = (q4 >> 4) & 0x0F0F0F0F;
+    const int8_t * q1_8   = (const int8_t *) &q1_32;
+    const char4    val1_8 = make_char4(
+        table[q1_8[0]], table[q1_8[1]], table[q1_8[2]], table[q1_8[3]]);
+
+    return make_int2(*((const int *) &val0_8), *((const int *) &val1_8));
+#else
+    // __byte_perm selects with 3-bit indices: look up in the low and high
+    // halves of the table, then pick between them with the fourth bit.
+    const uint32_t * table32 = (const uint32_t *) table;
+    uint32_t tmp[2];
+    const uint32_t low_high_selection_indices = (0x32103210 | ((q4 & 0x88888888) >> 1));
+#pragma unroll
+    for (uint32_t i = 0; i < 2; ++i) {
+        const uint32_t shift = 16 * i;
+
+        const uint32_t low  = __byte_perm(table32[0], table32[1], q4 >> shift);
+        const uint32_t high = __byte_perm(table32[2], table32[3], q4 >> shift);
+        tmp[i] = __byte_perm(low, high, low_high_selection_indices >> shift);
+    }
+    return make_int2(__byte_perm(tmp[0], tmp[1], 0x6420), __byte_perm(tmp[0], tmp[1], 0x7531));
+#endif
+}
+
+// UE4M3 scale code -> scale / 2 (the table holds 2 * E2M1). This is the
+// software branch of llama.cpp's ggml_cuda_ue4m3_to_fp32, which equals ggml's
+// CPU ggml_ue4m3_to_fp32 and the plugin's torch decoder for every code: 0x00
+// and 0x7F decode to 0 and bit 7 is ignored. (The vendored hardware-FP8 branch
+// reads bit 7 as a sign and 0xFF as NaN -> 0; an unsigned scale never sets it.)
+static __device__ __forceinline__ float nvfp4_ue4m3_to_fp32_half(const uint8_t x) {
+    if (x == 0 || x == 0x7F) {
+        return 0.0f;
+    }
+    const int exp = (x >> 3) & 0xF;
+    const int man = x & 0x7;
+    float raw;
+    if (exp == 0) {
+        raw = ldexpf((float) man, -9);
+    } else {
+        raw = ldexpf(1.0f + (float) man / 8.0f, exp - 7);
+    }
+    return raw * 0.5f;
+}
+
+// iqs (0 or 4) selects two of the block's four 16-value sub-blocks; each
+// sub-block is half of one q8_1 block.
+static __device__ __forceinline__ float vec_dot_nvfp4_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & iqs) {
+#if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 610 || defined USE_ROCM
+    const block_nvfp4 * bq4 = (const block_nvfp4 *) vbq;
+    float sum = 0.0f;
+#pragma unroll
+    for (int i = 0; i < VDR_NVFP4_Q8_1_MMVQ/2; i++) {
+        const int iqs0 = iqs + 2*i;
+        const int iqs1 = iqs0 + 1;
+        const int is = iqs0 >> 1;
+        const int2 v0 = get_int2_from_table_16(get_int_b4(bq4->qs, iqs0), kvalues_mxfp4);
+        const int2 v1 = get_int2_from_table_16(get_int_b4(bq4->qs, iqs1), kvalues_mxfp4);
+        const block_q8_1 * bq8 = bq8_1 + (is >> 1);
+        const int i8 = ((is & 1) << 2);
+
+        int sumi = __dp4a(v0.x, get_int_b4(bq8->qs, i8 + 0), 0);
+        sumi = __dp4a(v0.y, get_int_b4(bq8->qs, i8 + 2), sumi);
+        sumi = __dp4a(v1.x, get_int_b4(bq8->qs, i8 + 1), sumi);
+        sumi = __dp4a(v1.y, get_int_b4(bq8->qs, i8 + 3), sumi);
+
+        const float d = nvfp4_ue4m3_to_fp32_half(bq4->d[is]) * __low2float(bq8->ds);
+        sum += d * float(sumi);
+    }
+    return sum;
+#else
+    return 0.0f;
+#endif
+}

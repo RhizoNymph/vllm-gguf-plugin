@@ -13,7 +13,9 @@ static __global__ void moe_vec_q(const void* __restrict__ vx,
   const auto token = blockIdx.z / topk;
   const auto expert = (topk_ids)[blockIdx.z];
 
-  if (row >= nrows) {
+  // Padded token slots carry expert id -1 (vLLM's MoE padding mask); their
+  // rows stay zero (dst is zero-initialised) instead of reading W[-1].
+  if (row >= nrows || expert < 0) {
     return;
   }
 

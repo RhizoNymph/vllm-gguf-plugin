@@ -164,6 +164,27 @@ def test_moe_vec_matches_dequantized_experts(dtype, tokens, top_k):
     _assert_close_rel(got, want, out_eps[dtype])
 
 
+@torch.inference_mode()
+def test_moe_vec_skips_padded_slots():
+    """vLLM marks padded token slots with expert id -1; those output rows are
+    zero and the valid slots are unaffected."""
+    tokens, top_k, experts, rows, cols = 3, 2, 4, 64, 256
+    w, x, topk_ids = _moe_problem(tokens, top_k, experts, rows, cols, seed=9)
+    padded = topk_ids.clone()
+    padded[1, :] = -1
+    padded[2, 1] = -1
+
+    got = ops.ggml_moe_a8_vec(
+        x.cuda(), w.cuda(), padded.cuda(), top_k, NVFP4, rows, tokens
+    ).cpu()
+    torch.cuda.synchronize()
+
+    flat = padded.reshape(-1)
+    assert torch.all(got[flat < 0] == 0)
+    want = _moe_reference(x, _dense(w), topk_ids, top_k)
+    _assert_close_rel(got[flat >= 0], want[flat >= 0], 1e-5)
+
+
 @pytest.mark.parametrize("tokens,top_k", [(1, 8), (7, 4)])
 @torch.inference_mode()
 def test_moe_vec_matches_the_triton_kernel(tokens, top_k):

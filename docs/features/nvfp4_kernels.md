@@ -106,6 +106,8 @@ Otherwise the op runs its Triton kernel. NVFP4 is in the sets of
   it; a grouped launch never mixes a Triton type with a CUDA MMQ type.
 * Per-expert output scales are applied outside the kernels, identically on
   every `MoEKernel` path.
+* `moe_vec_q` (every type, NVFP4 included) leaves the output rows of slots
+  with expert id < 0 (vLLM's padding mask) at zero and never reads `W[-1]`.
 * NVFP4 needs a `_C_gguf` built from this tree: an older extension has no
   type-40 case and returned zeros for it (the switches now raise on unknown
   types).

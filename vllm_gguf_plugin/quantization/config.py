@@ -38,6 +38,9 @@ class GGUFConfig(QuantizationConfig):
         self.linear_layouts: dict[str, GGUFLinearLayout] = {}
         # ggml type of a Qwen4Exp PLE n-gram table, set by the loader.
         self.ple_weight_type: int | None = None
+        # Routed experts carry a per-expert output scale (ggml's ``.scale``
+        # beside NVFP4 experts), set by the weights adapter.
+        self.moe_expert_scales = False
 
     def __repr__(self) -> str:
         return "GGUFConfig()"

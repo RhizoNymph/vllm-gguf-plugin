@@ -17,6 +17,13 @@ blocks as Q4_0, which every GGUF linear and MoE path supports: Q2_0 stores
 Q4_0 stores ``(q - 8) * d`` with ``q`` in 0..15 and one fp16 ``d`` per 32,
 so ``q4 = q2 + 7`` with the same ``d`` reproduces every value bit for bit,
 at twice the storage.
+
+ggml's MXFP4 has no plugin kernels either. ``transcode_mxfp4_to_q5_0``
+rewrites it as Q5_0: an MXFP4 block holds ``k * 2**(e - 128)`` (``k`` the
+doubled E2M1 code, -12..12; ``e`` the E8M0 byte), and Q5_0 holds
+``(q - 16) * d``, so ``q = k + 16`` with ``d = 2**(e - 128)`` is exact
+whenever that power of two is an fp16 value (``e`` in 104..143), at 22
+bytes per 32 values instead of 17.
 """
 
 from __future__ import annotations
@@ -44,6 +51,14 @@ _NEW_TYPES = (
 
 _Q2_0_BLOCK_BYTES = 18
 _Q4_0_BLOCK_BYTES = 18
+_MXFP4_BLOCK_BYTES = 17
+_Q5_0_BLOCK_BYTES = 22
+# E8M0 exponents whose scale 2**(e - 128) is an fp16 value (subnormals
+# included: 2**-24 is the smallest).
+_MXFP4_FP16_EXPONENTS = range(104, 144)
+_E2M1_DOUBLED = np.array(
+    [0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12], dtype=np.int8
+)
 
 
 def _register(new: _NewType) -> GGMLQuantizationType:
@@ -111,3 +126,47 @@ def transcode_q2_0_to_q4_0(data: np.ndarray) -> np.ndarray:
     )
     assert out.shape[-1] == _Q4_0_BLOCK_BYTES
     return out.reshape(*lead, row_bytes * 2)
+
+
+class MXFP4ScaleOutOfRange(ValueError):
+    """An MXFP4 block scale has no exact fp16 (Q5_0) counterpart."""
+
+    def __init__(self, exponents: tuple[int, ...]) -> None:
+        self.exponents = exponents
+        super().__init__(
+            "MXFP4 block scale(s) 2**(e - 128) outside the fp16 range for "
+            f"e = {list(exponents)}; Q5_0 cannot hold these blocks exactly"
+        )
+
+
+def transcode_mxfp4_to_q5_0(data: np.ndarray) -> np.ndarray:
+    """Rewrite packed MXFP4 rows as Q5_0 rows holding identical values.
+
+    ``data`` is a uint8 array whose last axis is a whole number of MXFP4
+    blocks; leading axes (rows, experts) are preserved. Raises
+    :class:`MXFP4ScaleOutOfRange` if a block scale is not an fp16 value.
+    """
+    data = np.ascontiguousarray(data, dtype=np.uint8)
+    row_bytes = data.shape[-1]
+    if row_bytes % _MXFP4_BLOCK_BYTES:
+        raise ValueError(
+            f"MXFP4 row of {row_bytes} bytes is not a multiple of "
+            f"{_MXFP4_BLOCK_BYTES}-byte blocks"
+        )
+    lead = data.shape[:-1]
+    blocks = data.reshape(-1, _MXFP4_BLOCK_BYTES)
+    e = blocks[:, 0].astype(np.int32)
+    bad = ~((e >= _MXFP4_FP16_EXPONENTS.start) & (e < _MXFP4_FP16_EXPONENTS.stop))
+    if bad.any():
+        raise MXFP4ScaleOutOfRange(tuple(sorted({int(x) for x in e[bad]})))
+    d = np.ldexp(np.float32(1.0), e - 128).astype(np.float16).view(np.uint8)
+    qs = blocks[:, 1:]
+    # Element j of both formats sits in the low nibble of byte j (j < 16) or
+    # the high nibble of byte j - 16; Q5_0 keeps the fifth bit in qh.
+    codes = np.concatenate([qs & 0x0F, qs >> 4], axis=-1)
+    q5 = (_E2M1_DOUBLED[codes].astype(np.int16) + 16).astype(np.uint8)
+    qh = np.packbits(q5 >> 4, axis=-1, bitorder="little")
+    packed = (q5[:, :16] & 0x0F) | (q5[:, 16:] << 4)
+    out = np.concatenate([d.reshape(-1, 2), qh, packed], axis=-1)
+    assert out.shape[-1] == _Q5_0_BLOCK_BYTES
+    return out.reshape(*lead, row_bytes // _MXFP4_BLOCK_BYTES * _Q5_0_BLOCK_BYTES)

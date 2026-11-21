@@ -51,6 +51,8 @@ without one, serve text-only with `--limit-mm-per-prompt '{"image": 0}'`.
    * `dense_tensors_in_quantized_modules`: dense tensors served by a GGUF
      method (the BF16 `attn_sink_proj` shard beside quantized `q_proj`
      shards; dense experts) are kept out of the unquantized-module list.
+   * `patch_hf_config` also decides the LM head (see Storage decisions) and
+     sets `extra_unquantized_modules` accordingly.
 4. `load_model` -> `configure_quant_config` sets
    `GGUFConfig.moe_expert_scales`, so `GGUFMoEMethod.create_weights` adds
    `w13_expert_scale` / `w2_expert_scale` (`[E]`, F32, default 1).
@@ -86,7 +88,7 @@ Checked against the bytes of both repos (134 range-request comparisons).
 |---|---|---|
 | `token_embd.weight` [201024, 2304] | `model.llm.embed.weight` | packed GGUF embedding |
 | `token_embd_norm.weight` | `model.llm.embed_norm.weight` | F32 upcast |
-| `output.weight` | `model.llm.unembed.weight` | packed GGUF LM head |
+| `output.weight` | `model.llm.unembed.weight` | dequantized to BF16 for the fp32 head (default), else packed |
 | `output_norm.weight` | `model.llm.norm.weight` | |
 | `output_res_query.weight` | `model.llm.attn_res.output_query` | |
 | `loop_res_query.weight` [24, 2304] | `model.llm.middle_cycle_cross_pass_queries` | |
@@ -179,6 +181,13 @@ From llama.cpp `conversion/inkling2.py` (`Inkling2Model`,
 * Dense experts (UD-Q8_K_XL layers 20-23, BF16) carry a `weight_type`
   companion so `GGUFMoEMethod` serves them (slow fallback path).
 * The DSpark Q8_0 projections are dequantized to BF16 (0.40 -> 0.65 GB).
+* LM head: Inkling2's config sets `head_dtype: float32` (BF16 unembedding,
+  fp32 logits), and vLLM's `LogitsProcessor` only runs a different head
+  dtype over an unquantized `lm_head`. The adapter then lists `lm_head` as
+  unquantized and dequantizes `output.weight` to BF16 on load, in 8192-row
+  chunks (UD-IQ4_XS Q6_K 0.38 GB -> 0.93 GB; UD-Q4_K_XL Q8_0 0.49 GB ->
+  0.93 GB). `--hf-overrides '{"head_dtype": "model"}'` keeps it packed on
+  the GGUF kernels, with bf16 logits.
 
 ## Files
 

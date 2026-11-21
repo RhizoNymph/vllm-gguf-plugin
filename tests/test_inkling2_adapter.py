@@ -649,3 +649,58 @@ def test_dense_shards_of_quantized_modules_are_not_unquantized(tmp_path):
     assert _get_unquantized_modules(
         files, names, frozenset({"blk.0.attn_sink_proj.weight"})
     ) == (LAYER + "attn_norm",)
+
+
+# ---------------------------------------------------------------- LM head
+#
+# Inkling2's config asks for an fp32 head (``head_dtype: float32``), which
+# vLLM's LogitsProcessor only runs over an unquantized lm_head. The packed
+# GGUF ``output.weight`` is then dequantized to BF16 (the checkpoint's own
+# unembedding dtype) on load.
+
+
+def test_lm_head_is_dequantized_to_bf16_for_an_fp32_head():
+    from gguf.quants import dequantize, quantize
+
+    real = _tensors("ud_iq4_xs")
+    plan = build_load_plan(
+        {"output.weight": real["output.weight"][0]},
+        _metadata(),
+        num_experts=E,
+        dense_lm_head=True,
+    )
+    values = torch.randn(300, 256)
+    packed = torch.from_numpy(quantize(values.numpy(), T.Q8_0))
+    name = "model.llm.unembed.weight"
+    out = dict(
+        inkling2_weights(
+            [(name + "_type", torch.tensor(int(T.Q8_0))), (name, packed)], plan
+        )
+    )
+    assert set(out) == {name}
+    assert out[name].dtype is torch.bfloat16
+    want = torch.from_numpy(dequantize(packed.numpy(), T.Q8_0)).to(torch.bfloat16)
+    assert torch.equal(out[name], want)
+
+
+def test_lm_head_stays_packed_without_an_fp32_head():
+    plan = build_load_plan(
+        {"output.weight": T.Q6_K}, _metadata(), num_experts=E, dense_lm_head=False
+    )
+    name = "model.llm.unembed.weight"
+    packed = torch.zeros(4, 210, dtype=torch.uint8)
+    out = list(
+        inkling2_weights(
+            [(name + "_type", torch.tensor(int(T.Q6_K))), (name, packed)], plan
+        )
+    )
+    assert [n for n, _ in out] == [name + "_type", name]
+
+
+@pytest.mark.parametrize(("head_dtype", "dense"), [("float32", True), ("model", False)])
+def test_adapter_follows_the_head_dtype(head_dtype, dense):
+    adapter = Inkling2GGUFAdapter()
+    config = _config()
+    config.head_dtype = head_dtype
+    assert adapter.wants_dense_lm_head(config) is dense
+    assert ("lm_head" in adapter.unquantized_modules_for(config)) is dense

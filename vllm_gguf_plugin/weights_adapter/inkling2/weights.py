@@ -16,6 +16,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
 
+import gguf
 import torch
 from gguf import GGMLQuantizationType
 
@@ -73,6 +74,13 @@ class Inkling2LoadPlan:
     #: get a ``weight_type`` companion and must not be listed as unquantized
     #: modules (a merged linear may not mix quant methods).
     dense_in_quantized_modules: frozenset[str] = field(default_factory=frozenset)
+    #: GGUF names of packed tensors served dense: dequantized to BF16 on load
+    #: (the LM head when the config asks for an fp32 head).
+    dequantize_on_load: frozenset[str] = field(default_factory=frozenset)
+
+    @cached_property
+    def dequantized_hf_names(self) -> frozenset[str]:
+        return frozenset(self.targets[g].hf_name for g in self.dequantize_on_load)
 
     @cached_property
     def by_hf_name(self) -> dict[str, tuple[str, TensorTarget]]:
@@ -116,8 +124,12 @@ def build_load_plan(
     types: Mapping[str, GGMLQuantizationType],
     meta: Inkling2GGUFMetadata,
     num_experts: int,
+    dense_lm_head: bool = False,
 ) -> Inkling2LoadPlan:
-    """Plan the weight stream for GGUF tensors *types* (name -> ggml type)."""
+    """Plan the weight stream for GGUF tensors *types* (name -> ggml type).
+
+    *dense_lm_head* serves a packed ``output.weight`` as BF16.
+    """
     targets = inkling2_targets(types, meta)
     dense: set[str] = set()
     for layer in range(meta.num_layers):
@@ -137,7 +149,32 @@ def build_load_plan(
         num_layers=meta.num_layers,
         num_experts=num_experts,
         dense_in_quantized_modules=frozenset(dense),
+        dequantize_on_load=frozenset(
+            {"output.weight"}
+            if dense_lm_head
+            and "output.weight" in types
+            and types["output.weight"] not in _DENSE_TYPES
+            else ()
+        ),
     )
+
+
+_DEQUANT_CHUNK_ROWS = 8192
+
+
+def _dequantize_bf16(weight: torch.Tensor, weight_type: int) -> torch.Tensor:
+    """Dequantize packed rows on the CPU to BF16, a chunk of rows at a time
+    (the 201024-row LM head would need 1.9 GB of fp32 at once)."""
+    qtype = GGMLQuantizationType(weight_type)
+    block, type_size = gguf.GGML_QUANT_SIZES[qtype]
+    rows = weight.reshape(-1, weight.shape[-1]).cpu()
+    cols = rows.shape[-1] // type_size * block
+    out = torch.empty(rows.shape[0], cols, dtype=torch.bfloat16)
+    for start in range(0, rows.shape[0], _DEQUANT_CHUNK_ROWS):
+        chunk = rows[start : start + _DEQUANT_CHUNK_ROWS].numpy()
+        values = gguf.quants.dequantize(chunk, qtype)
+        out[start : start + chunk.shape[0]] = torch.from_numpy(values)
+    return out.reshape(*weight.shape[:-1], cols)
 
 
 def _type_tensor(weight_type: int) -> torch.Tensor:
@@ -211,6 +248,9 @@ def inkling2_weights(
         _, target = entry
         conversion = target.conversion
         weight_type = pending.pop(name, None)
+        if name in plan.dequantized_hf_names and weight_type is not None:
+            yield name, _dequantize_bf16(weight, weight_type)
+            continue
         if weight_type is None and name in plan.dense_typed_hf_names:
             weight_type = int(_TORCH_TO_GGML[weight.dtype])
 

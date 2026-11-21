@@ -65,6 +65,22 @@ class Inkling2GGUFAdapter(BaseGGUFWeightsAdapter):
     def __init__(self) -> None:
         self.metadata: Inkling2GGUFMetadata | None = None
         self.plan: Inkling2LoadPlan | None = None
+        self.dense_lm_head = False
+
+    @staticmethod
+    def wants_dense_lm_head(hf_config: PretrainedConfig) -> bool:
+        """Whether the config asks for an fp32 LM head.
+
+        Inkling2's config defaults to ``head_dtype: float32`` (BF16
+        unembedding, fp32 logits), which vLLM's LogitsProcessor runs only
+        over an unquantized lm_head; the packed GGUF head is then
+        dequantized to BF16. ``--hf-overrides '{"head_dtype": "model"}'``
+        keeps it packed (bf16 logits, ~0.5 GB less).
+        """
+        return str(getattr(hf_config, "head_dtype", None)).lower() == "float32"
+
+    def unquantized_modules_for(self, hf_config: PretrainedConfig) -> tuple[str, ...]:
+        return ("lm_head",) if self.wants_dense_lm_head(hf_config) else ()
 
     @classmethod
     def matches(cls, config) -> bool:
@@ -91,6 +107,14 @@ class Inkling2GGUFAdapter(BaseGGUFWeightsAdapter):
         if vision is not None and files.mm_proj is not None:
             validate_inkling2_vision_config(read_gguf_kv(files.mm_proj), vision)
         hf_config.architectures = [INKLING2_ARCHITECTURES[hf_config.model_type]]
+        self.dense_lm_head = self.wants_dense_lm_head(hf_config)
+        # Read by the loader after this call.
+        self.extra_unquantized_modules = self.unquantized_modules_for(hf_config)
+        if self.dense_lm_head:
+            logger.info(
+                "Inkling2 GGUF: dequantizing the LM head to BF16 for the "
+                "config's fp32 head (head_dtype=float32)"
+            )
         return hf_config
 
     def build_name_map(
@@ -110,6 +134,7 @@ class Inkling2GGUFAdapter(BaseGGUFWeightsAdapter):
             _tensor_types(files.all_files),
             self._load_metadata(files),
             num_experts=text_config.n_routed_experts,
+            dense_lm_head=self.dense_lm_head,
         )
         return name_map(self.plan.targets)
 

@@ -69,12 +69,14 @@ def _revision_for_weights_repo(
 def _get_unquantized_modules(
     files: GGUFModelFiles,
     name_map: dict[str, str],
+    served_quantized: frozenset[str] = frozenset(),
 ) -> tuple[str, ...]:
     unquantized_tensors = get_gguf_unquantized_params(list(files.all_files))
     modules = {
         mapped_name.removesuffix(".weight")
         for gguf_name in unquantized_tensors
-        if (mapped_name := name_map.get(gguf_name)) is not None
+        if gguf_name not in served_quantized
+        and (mapped_name := name_map.get(gguf_name)) is not None
         and mapped_name.endswith(".weight")
     }
     return tuple(sorted(modules))
@@ -173,9 +175,9 @@ class GGUFModelLoader(BaseModelLoader):
         )
 
         name_map = adapter.build_name_map(files, model_config)
-        unquantized_modules = _get_unquantized_modules(files, name_map) + tuple(
-            adapter.extra_unquantized_modules
-        )
+        unquantized_modules = _get_unquantized_modules(
+            files, name_map, adapter.dense_tensors_in_quantized_modules()
+        ) + tuple(adapter.extra_unquantized_modules)
         linear_layouts = adapter.get_linear_layouts(files, model_config, name_map)
         return adapter, GGUFLoadPlan(
             files, name_map, unquantized_modules, linear_layouts

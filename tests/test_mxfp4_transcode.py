@@ -50,9 +50,7 @@ def _random_mxfp4(rows: int, cols: int, seed: int = 0, lo=104, hi=144):
 
 def test_reference_matches_gguf_py():
     data = _random_mxfp4(3, 64)
-    assert np.array_equal(
-        _mxfp4_reference(data), dequantize(data, MXFP4).reshape(-1)
-    )
+    assert np.array_equal(_mxfp4_reference(data), dequantize(data, MXFP4).reshape(-1))
 
 
 @pytest.mark.parametrize("shape", [(1, 32), (4, 256), (2, 3, 128)])
@@ -108,6 +106,4 @@ def test_iterator_serves_mxfp4_as_q5_0(tmp_path):
     assert int(tensors["blk.0.ffn_down.weight_type"]) == int(Q5_0)
     weight = tensors["blk.0.ffn_down.weight"]
     assert weight.dtype == torch.uint8
-    assert np.array_equal(
-        dequantize(weight.numpy(), Q5_0), dequantize(data, MXFP4)
-    )
+    assert np.array_equal(dequantize(weight.numpy(), Q5_0), dequantize(data, MXFP4))

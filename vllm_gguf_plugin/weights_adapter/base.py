@@ -67,6 +67,14 @@ class BaseGGUFWeightsAdapter(ABC):
         del files, model_config, name_map
         return {}
 
+    def dense_tensors_in_quantized_modules(self) -> frozenset[str]:
+        """GGUF names of F32/F16/BF16 tensors served by a GGUF-quantized
+        module (e.g. one dense shard of an otherwise quantized merged
+        linear). They are kept out of the unquantized-module list; the
+        adapter gives them a ``weight_type`` companion. Valid after
+        :meth:`build_name_map`."""
+        return frozenset()
+
     def configure_quant_config(
         self,
         files: GGUFModelFiles,

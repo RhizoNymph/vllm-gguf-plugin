@@ -12,6 +12,7 @@ from .diffusion import (
 )
 from .gemma3 import Gemma3GGUFAdapter
 from .gemma4 import Gemma4GGUFAdapter
+from .inkling2 import Inkling2GGUFAdapter
 from .olmoe import OLMoEGGUFAdapter
 from .qwen3_5 import Qwen35GGUFAdapter, Qwen35MtpGGUFAdapter
 from .qwen4_exp import Qwen4ExpGGUFAdapter
@@ -20,6 +21,7 @@ from .transformers import TransformersGGUFWeightsAdapter
 _ADAPTER_REGISTRY: list[type[BaseGGUFWeightsAdapter]] = [
     Gemma3GGUFAdapter,
     Gemma4GGUFAdapter,
+    Inkling2GGUFAdapter,
     OLMoEGGUFAdapter,
     Qwen35GGUFAdapter,
     Qwen35MtpGGUFAdapter,
@@ -50,6 +52,7 @@ __all__ = [
     "GGUFModelFiles",
     "Gemma3GGUFAdapter",
     "Gemma4GGUFAdapter",
+    "Inkling2GGUFAdapter",
     "OLMoEGGUFAdapter",
     "QwenImageDiffusionGGUFAdapter",
     "Qwen35GGUFAdapter",

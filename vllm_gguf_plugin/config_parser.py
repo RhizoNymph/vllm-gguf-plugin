@@ -45,7 +45,11 @@ logger = init_logger(__name__)
 
 # GGUF architectures whose config cannot be rebuilt from metadata: the file
 # omits fields the vLLM model needs, so the HF repo has to supply it.
-_CONFIG_REPOS = {"qwen4exp": "Qwen/Qwen3.8-Flash-Next"}
+_CONFIG_REPOS = {
+    "qwen4exp": "Qwen/Qwen3.8-Flash-Next",
+    "inkling2": "thinkingmachines/Inkling-2-Mini",
+    "inkling2_loop": "thinkingmachines/Inkling-2-Mini",
+}
 
 
 def _reject_config_from_metadata_only(gguf_file: str) -> None:

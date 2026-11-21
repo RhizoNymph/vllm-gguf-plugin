@@ -33,6 +33,19 @@ from .params import (
 from .utils import MMQ_QUANT_TYPES, MOE_VEC_QUANT_TYPES, logger
 
 
+def _mask_padded_slots(
+    topk_weights: torch.Tensor, topk_ids: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Point padded routing slots at expert 0 with no weight.
+
+    vLLM's routers mark padded tokens (CUDA graph capture, DP padding) with
+    expert id -1 and weight 0; the GGUF kernels index experts by id, so a
+    negative id reads before the weights. Returns new tensors.
+    """
+    padded = topk_ids < 0
+    return topk_weights.masked_fill(padded, 0), topk_ids.clamp_min(0)
+
+
 def _fused_moe_gguf(
     x: torch.Tensor,
     w1: torch.Tensor,
@@ -55,6 +68,7 @@ def _fused_moe_gguf(
     ``situ_beta`` / ``situ_linear_beta`` configure the SITU activation.
     """
     activation_enum = MoEActivation.from_str(activation)
+    topk_weights, topk_ids = _mask_padded_slots(topk_weights, topk_ids)
     activation_config = (
         None
         if situ_beta is None

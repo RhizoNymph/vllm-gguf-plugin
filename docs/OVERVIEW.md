@@ -53,8 +53,11 @@ Overview:
     quantization: >
       quantization/* implements the GGUF quantization backend (linear, MoE,
       embeddings) over ggml block layouts; triton/ and csrc/ hold the
-      dequantisation kernels. ggml NVFP4 has Triton kernels only
-      (dequantize, fused MoE). MoE layers may carry per-expert output scales
+      dequantisation kernels. ggml NVFP4 decodes on CUDA vector kernels
+      (dense MMVQ, per-token MoE) and prefills on Triton (dequantize, grouped
+      fused MoE); select_moe_kernel picks the MoE path per call and ops.py
+      keeps a per-op table of the types each CUDA kernel serves. MoE layers
+      may carry per-expert output scales
       and SITU betas; merged linears with shards of different types store
       them unpadded in one byte buffer.
   data_flow: >
@@ -112,14 +115,27 @@ Features Index:
       vLLM fork's Inkling2Loop QUANT_METHOD backend: config from the HF repo
       validated against backbone and mmproj metadata, exact GGUF -> HF names
       and llama.cpp conversions reversed, NVFP4 experts with per-expert
-      scales on Triton kernels, MXFP4 as exact Q5_0, a BF16 shard inside a
+      scales (CUDA decode, Triton prefill), MXFP4 as exact Q5_0, a BF16 shard
+      inside a
       quantized merged q_proj, and the DSpark draft's name map.
     entry_points:
       - vllm_gguf_plugin.weights_adapter.inkling2.Inkling2GGUFAdapter
       - vllm_gguf_plugin.triton.fused_moe.fp4_quant.ggml_moe_nvfp4_triton
       - vllm_gguf_plugin.gguf_compat.transcode_mxfp4_to_q5_0
-    depends_on: [model_resolution]
+    depends_on: [model_resolution, nvfp4_kernels]
     doc: docs/features/inkling2.md
+  nvfp4_kernels:
+    description: >
+      ggml NVFP4 GEMMs: CUDA matrix-vector kernels for decode (dense MMVQ and
+      the per-(token, expert) MoE kernel, on llama.cpp's vec_dot_nvfp4_q8_1),
+      Triton for prefill (grouped fused MoE above 64 tokens, dequantize +
+      GEMM for dense), and the dispatch that chooses between them.
+    entry_points:
+      - vllm_gguf_plugin.quantization.fused_moe.select_moe_kernel
+      - vllm_gguf_plugin.ops.ggml_moe_a8_vec
+      - vllm_gguf_plugin.ops.ggml_mul_mat_vec_a8
+    depends_on: []
+    doc: docs/features/nvfp4_kernels.md
 ```
 
 ## Invariants

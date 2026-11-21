@@ -66,7 +66,9 @@ without one, serve text-only with `--limit-mm-per-prompt '{"image": 0}'`.
    `w2_<suffix>`).
 7. At run time Inkling routes and calls `GGUFMoEMethod.apply`, which passes
    the expert scales and `moe_config.activation_situ_{,linear_}beta` to
-   `_fused_moe_gguf`.
+   `_fused_moe_gguf`, which runs NVFP4 experts on the CUDA vector kernel up
+   to 64 tokens and on the Triton grouped kernel above
+   (`nvfp4_kernels.md`).
 
 ## Layer visits and the loop
 
@@ -164,7 +166,7 @@ From llama.cpp `conversion/inkling2.py` (`Inkling2Model`,
 
 | Type | Where | Served by |
 |---|---|---|
-| NVFP4 (40) | experts of layers 0-19, every quant | new Triton dequantize + fused MoE kernels (`triton/*/fp4_quant/nvfp4.py`); MoE takes the per-token path (`MOE_VEC_QUANT_TYPES`) |
+| NVFP4 (40) | experts of layers 0-19, every quant | decode (<= 64 tokens): CUDA `moe_vec_q` on `vec_dot_nvfp4_q8_1`; prefill: Triton grouped fused MoE (`triton/fused_moe/fp4_quant/nvfp4.py`); see `nvfp4_kernels.md` |
 | MXFP4 (39) | one `ffn_down_exps` in UD-Q2_K_XL | `transcode_mxfp4_to_q5_0` on load, bit-exact (+29% for that tensor) |
 | Q2_0 (42) | `ffn_down_exps` in UD-IQ1_*, IQ2_XXS, Q2_K_XL | existing Q2_0 -> Q4_0 transcode |
 | BF16 | `attn_sink_proj`, `attn_*_conv_proj`, Q8_K_XL linears | dense; the sink is a typed shard of a quantized `q_proj` |
@@ -200,7 +202,8 @@ From llama.cpp `conversion/inkling2.py` (`Inkling2Model`,
 | `vllm_gguf_plugin/weights_adapter/inkling2/dspark.py` | `dspark_weights` |
 | `vllm_gguf_plugin/quantization/nvfp4.py` | torch NVFP4 decoder (reference) |
 | `vllm_gguf_plugin/triton/fp4_tables.py`, `triton/dequantize/fp4_quant/`, `triton/fused_moe/fp4_quant/` | NVFP4 Triton kernels |
-| `vllm_gguf_plugin/quantization/fused_moe.py` | expert scales, SITU betas, NVFP4 routing |
+| `vllm_gguf_plugin/csrc/gguf/{ggml-common.h,vecdotq.cuh,mmvq.cuh,moe_vec.cuh}` | NVFP4 CUDA vector kernels (`nvfp4_kernels.md`) |
+| `vllm_gguf_plugin/quantization/fused_moe.py` | expert scales, SITU betas, `select_moe_kernel` (NVFP4 routing) |
 | `vllm_gguf_plugin/quantization/linear.py` | unpadded mixed-type merged shards |
 | `vllm_gguf_plugin/gguf_compat.py`, `weight_utils.py` | MXFP4 -> Q5_0 |
 | `vllm_gguf_plugin/loader.py`, `weights_adapter/base.py` | `dense_tensors_in_quantized_modules` hook |

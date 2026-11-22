@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -39,6 +39,16 @@ class BaseGGUFWeightsAdapter(ABC):
         """Return an architecture override required before model loading."""
         del config
         return None
+
+    @classmethod
+    def config_defaults(cls, config: PretrainedConfig) -> dict[str, Any]:
+        """HF config fields a GGUF serves differently from its checkpoint.
+
+        The GGUF config parser applies them in every process, before vLLM
+        applies ``--hf-overrides``, so an explicit override still wins.
+        """
+        del config
+        return {}
 
     @abstractmethod
     def build_name_map(

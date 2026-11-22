@@ -71,11 +71,10 @@ class Inkling2GGUFAdapter(BaseGGUFWeightsAdapter):
     def wants_dense_lm_head(hf_config: PretrainedConfig) -> bool:
         """Whether the config asks for an fp32 LM head.
 
-        Inkling2's config defaults to ``head_dtype: float32`` (BF16
-        unembedding, fp32 logits), which vLLM's LogitsProcessor runs only
-        over an unquantized lm_head; the packed GGUF head is then
-        dequantized to BF16. ``--hf-overrides '{"head_dtype": "model"}'``
-        keeps it packed (bf16 logits, ~0.5 GB less).
+        Only an explicit ``--hf-overrides '{"head_dtype": "float32"}'`` does
+        (see :meth:`config_defaults`). vLLM's LogitsProcessor runs an fp32
+        head only over an unquantized lm_head, so the packed GGUF head is
+        then dequantized to BF16 (~0.5 GB more, ~5% slower decode).
         """
         return str(getattr(hf_config, "head_dtype", None)).lower() == "float32"
 
@@ -89,6 +88,17 @@ class Inkling2GGUFAdapter(BaseGGUFWeightsAdapter):
     @classmethod
     def architecture(cls, config) -> str | None:
         return INKLING2_ARCHITECTURES.get(config.model_type)
+
+    @classmethod
+    def config_defaults(cls, config) -> dict[str, str]:
+        """Serve the GGUF's packed LM head, as llama.cpp does.
+
+        Inkling2's config defaults to ``head_dtype: float32`` (BF16
+        unembedding, fp32 logits); a GGUF computes the logits from its
+        packed ``output.weight`` in the model dtype instead.
+        """
+        del config
+        return {"head_dtype": "model"}
 
     def _load_metadata(self, files: GGUFModelFiles) -> Inkling2GGUFMetadata:
         if self.metadata is None:
@@ -113,7 +123,7 @@ class Inkling2GGUFAdapter(BaseGGUFWeightsAdapter):
         if self.dense_lm_head:
             logger.info(
                 "Inkling2 GGUF: dequantizing the LM head to BF16 for the "
-                "config's fp32 head (head_dtype=float32)"
+                "fp32 head override (head_dtype=float32)"
             )
         return hf_config
 

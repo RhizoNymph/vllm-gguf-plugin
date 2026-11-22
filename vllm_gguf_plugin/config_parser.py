@@ -16,7 +16,7 @@ from .gguf_utils import (
     maybe_patch_hf_config_from_gguf,
     split_remote_gguf,
 )
-from .weights_adapter import get_adapter_architecture
+from .weights_adapter import get_adapter_architecture, get_adapter_config_defaults
 
 
 def _find_local_gguf_file(model: str | Path) -> str | None:
@@ -113,6 +113,11 @@ class GGUFConfigParser(ConfigParserBase):
 
         config_dict["architectures"] = [architecture]
         config.update({"architectures": [architecture]})
+
+        defaults = get_adapter_config_defaults(config)
+        if defaults:
+            config_dict.update(defaults)
+            config.update(defaults)
 
         patch_source = gguf_file_path if gguf_file_path is not None else original_model
         if is_gguf(patch_source):

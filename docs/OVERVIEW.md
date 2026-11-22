@@ -113,7 +113,9 @@ Features Index:
       validated against backbone and mmproj metadata, exact GGUF -> HF names
       and llama.cpp conversions reversed, NVFP4 experts with per-expert
       scales on Triton kernels, MXFP4 as exact Q5_0, a BF16 shard inside a
-      quantized merged q_proj, and the DSpark draft's name map.
+      quantized merged q_proj, the packed Q6_K/Q8_0 LM head by default
+      (head_dtype reset to model at config parse), and the DSpark draft's
+      name map.
     entry_points:
       - vllm_gguf_plugin.weights_adapter.inkling2.Inkling2GGUFAdapter
       - vllm_gguf_plugin.triton.fused_moe.fp4_quant.ggml_moe_nvfp4_triton

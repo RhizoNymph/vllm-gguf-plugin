@@ -45,6 +45,14 @@ def get_adapter_architecture(config) -> str | None:
     return None
 
 
+def get_adapter_config_defaults(config) -> dict:
+    """Return the GGUF config defaults declared by a registered adapter."""
+    for cls in _ADAPTER_REGISTRY:
+        if cls.matches(config):
+            return cls.config_defaults(config)
+    return {}
+
+
 __all__ = [
     "BaseGGUFWeightsAdapter",
     "DiffusionGGUFAdapter",
@@ -61,6 +69,7 @@ __all__ = [
     "TransformersGGUFWeightsAdapter",
     "ZImageDiffusionGGUFAdapter",
     "get_adapter_architecture",
+    "get_adapter_config_defaults",
     "get_diffusion_gguf_adapter",
     "get_weights_adapter",
 ]

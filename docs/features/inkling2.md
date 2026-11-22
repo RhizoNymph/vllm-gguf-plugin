@@ -38,7 +38,9 @@ without one, serve text-only with `--limit-mm-per-prompt '{"image": 0}'`.
 1. `EngineArgs.create_model_config` (patched) resolves the GGUF; the config
    comes from the repo (`Inkling2LoopMMConfig`, registered by the fork).
 2. `get_adapter_architecture` finds `Inkling2GGUFAdapter` (model types
-   `inkling2_loop`, `inkling2`).
+   `inkling2_loop`, `inkling2`), and `get_adapter_config_defaults` applies
+   its `config_defaults`: `head_dtype: model` (see Storage decisions). The
+   parser runs in every process, before vLLM applies `--hf-overrides`.
 3. `GGUFModelLoader._prepare_adapter`:
    * `patch_hf_config` validates the text config against `inkling2.*`
      metadata (`validate_inkling2_config`) and, with an mmproj, the vision
@@ -181,13 +183,17 @@ From llama.cpp `conversion/inkling2.py` (`Inkling2Model`,
 * Dense experts (UD-Q8_K_XL layers 20-23, BF16) carry a `weight_type`
   companion so `GGUFMoEMethod` serves them (slow fallback path).
 * The DSpark Q8_0 projections are dequantized to BF16 (0.40 -> 0.65 GB).
-* LM head: Inkling2's config sets `head_dtype: float32` (BF16 unembedding,
-  fp32 logits), and vLLM's `LogitsProcessor` only runs a different head
-  dtype over an unquantized `lm_head`. The adapter then lists `lm_head` as
-  unquantized and dequantizes `output.weight` to BF16 on load, in 8192-row
-  chunks (UD-IQ4_XS Q6_K 0.38 GB -> 0.93 GB; UD-Q4_K_XL Q8_0 0.49 GB ->
-  0.93 GB). `--hf-overrides '{"head_dtype": "model"}'` keeps it packed on
-  the GGUF kernels, with bf16 logits.
+* LM head: served packed on the GGUF kernels with bf16 logits, as
+  llama.cpp computes logits from `output.weight`. Inkling2's config sets
+  `head_dtype: float32` (BF16 unembedding, fp32 logits); the GGUF config
+  parser resets it to `model` (`Inkling2GGUFAdapter.config_defaults`). On
+  UD-IQ4_XS (Q6_K head) that is ~5% faster decode than the dequantized head,
+  with identical greedy text on the checked prompts and top logprobs within
+  0.09. `--hf-overrides '{"head_dtype": "float32"}'` restores the fp32
+  head: vLLM's `LogitsProcessor` only runs a different head dtype over an
+  unquantized `lm_head`, so the adapter then lists `lm_head` as unquantized
+  and dequantizes `output.weight` to BF16 on load, in 8192-row chunks
+  (UD-IQ4_XS Q6_K 0.38 GB -> 0.93 GB; UD-Q4_K_XL Q8_0 0.49 GB -> 0.93 GB).
 
 ## Files
 
@@ -196,7 +202,7 @@ From llama.cpp `conversion/inkling2.py` (`Inkling2Model`,
 | `vllm_gguf_plugin/weights_adapter/inkling2/metadata.py` | `Inkling2GGUFMetadata`, `LoopLayout`, `validate_inkling2_{,vision_,dspark_}config`, `Inkling2ConfigMismatch` |
 | `vllm_gguf_plugin/weights_adapter/inkling2/names.py` | exact name tables, `Conversion`, `TensorTarget`, `inkling2_targets`, `dspark_name_map`, `UnmappedTensorsError` |
 | `vllm_gguf_plugin/weights_adapter/inkling2/weights.py` | `Inkling2LoadPlan`, `build_load_plan`, `inkling2_weights` |
-| `vllm_gguf_plugin/weights_adapter/inkling2/adapter.py` | `Inkling2GGUFAdapter` |
+| `vllm_gguf_plugin/weights_adapter/inkling2/adapter.py` | `Inkling2GGUFAdapter` (`config_defaults`: packed LM head) |
 | `vllm_gguf_plugin/weights_adapter/inkling2/dspark.py` | `dspark_weights` |
 | `vllm_gguf_plugin/quantization/nvfp4.py` | torch NVFP4 decoder (reference) |
 | `vllm_gguf_plugin/triton/fp4_tables.py`, `triton/dequantize/fp4_quant/`, `triton/fused_moe/fp4_quant/` | NVFP4 Triton kernels |
@@ -204,7 +210,7 @@ From llama.cpp `conversion/inkling2.py` (`Inkling2Model`,
 | `vllm_gguf_plugin/quantization/linear.py` | unpadded mixed-type merged shards |
 | `vllm_gguf_plugin/gguf_compat.py`, `weight_utils.py` | MXFP4 -> Q5_0 |
 | `vllm_gguf_plugin/loader.py`, `weights_adapter/base.py` | `dense_tensors_in_quantized_modules` hook |
-| `vllm_gguf_plugin/config_parser.py` | `inkling2` -> repo pointer |
+| `vllm_gguf_plugin/config_parser.py` | `inkling2` -> repo pointer; applies `get_adapter_config_defaults` |
 | `tests/test_inkling2_adapter.py`, `tests/test_inkling2_vllm_names.py`, `tests/test_nvfp4.py`, `tests/test_gguf_moe_expert_scales.py`, `tests/test_mixed_shard_linear.py`, `tests/test_mxfp4_transcode.py` | CPU tests (Triton ones under `TRITON_INTERPRET=1`) |
 | `tests/fixtures/inkling2/` | header extracts of UD-IQ4_XS, UD-Q4_K_XL, mmproj-BF16, DSpark Q8_0; ggml types of every file; the repo config; the checkpoint's names/dtypes/shapes; real NVFP4 rows |
 

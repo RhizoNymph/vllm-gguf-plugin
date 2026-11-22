@@ -653,10 +653,61 @@ def test_dense_shards_of_quantized_modules_are_not_unquantized(tmp_path):
 
 # ---------------------------------------------------------------- LM head
 #
-# Inkling2's config asks for an fp32 head (``head_dtype: float32``), which
-# vLLM's LogitsProcessor only runs over an unquantized lm_head. The packed
-# GGUF ``output.weight`` is then dequantized to BF16 (the checkpoint's own
-# unembedding dtype) on load.
+# Inkling2's config asks for an fp32 head (``head_dtype: float32``). A GGUF
+# serves its packed ``output.weight`` as llama.cpp does, so the GGUF config
+# parser resets the head to the model dtype. ``--hf-overrides
+# '{"head_dtype": "float32"}'`` (applied after parsing) opts back in; vLLM's
+# LogitsProcessor runs an fp32 head only over an unquantized lm_head, so the
+# packed head is then dequantized to BF16 (the checkpoint's own unembedding
+# dtype) on load.
+
+
+def _parse_inkling2_config(monkeypatch, config):
+    import vllm_gguf_plugin.config_parser as config_parser_module
+
+    monkeypatch.setattr(
+        config_parser_module.HFConfigParser,
+        "parse",
+        lambda self, model, trust_remote_code, **kwargs: (config.to_dict(), config),
+    )
+    return config_parser_module.GGUFConfigParser().parse(
+        "thinkingmachines/Inkling-2-Mini", trust_remote_code=False
+    )
+
+
+def test_gguf_parser_serves_the_packed_head(monkeypatch):
+    config = _config()
+    assert config.head_dtype == "float32"
+    config_dict, parsed = _parse_inkling2_config(monkeypatch, config)
+    assert parsed.head_dtype == "model"
+    assert config_dict["head_dtype"] == "model"
+    assert not Inkling2GGUFAdapter.wants_dense_lm_head(parsed)
+    assert Inkling2GGUFAdapter().unquantized_modules_for(parsed) == ()
+
+
+def test_an_fp32_head_override_after_parsing_dequantizes_the_head(monkeypatch):
+    _, parsed = _parse_inkling2_config(monkeypatch, _config())
+    # vLLM applies ``--hf-overrides`` to the parsed config.
+    parsed.update({"head_dtype": "float32"})
+    assert Inkling2GGUFAdapter.wants_dense_lm_head(parsed)
+    assert Inkling2GGUFAdapter().unquantized_modules_for(parsed) == ("lm_head",)
+
+
+def test_gguf_parser_leaves_other_models_head_dtype(monkeypatch):
+    from transformers import PretrainedConfig
+
+    import vllm_gguf_plugin.config_parser as config_parser_module
+
+    config = PretrainedConfig(model_type="qwen3_moe", head_dtype="float32")
+    monkeypatch.setattr(
+        config_parser_module.HFConfigParser,
+        "parse",
+        lambda self, model, trust_remote_code, **kwargs: ({}, config),
+    )
+    _, parsed = config_parser_module.GGUFConfigParser().parse(
+        "Qwen/Qwen3-30B-A3B", trust_remote_code=False
+    )
+    assert parsed.head_dtype == "float32"
 
 
 def test_lm_head_is_dequantized_to_bf16_for_an_fp32_head():
